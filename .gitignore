@@ -1,0 +1,13 @@
+# Credentials - KABHI UPLOAD MAT KARO
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs (optional - GitHub pe upload nahi)
+logs/
+
+# Images
+*.png
