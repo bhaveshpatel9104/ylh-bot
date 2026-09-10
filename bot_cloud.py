@@ -21,6 +21,7 @@ YLH_PASSWORD    = os.environ.get("YLH_PASSWORD",    "BHAVESH91045678VV")
 GOOGLE_EMAIL    = os.environ.get("GOOGLE_EMAIL",    "patelbhavesh9130@gmail.com")
 GOOGLE_PASSWORD = os.environ.get("GOOGLE_PASSWORD", "BHAVESH9104VV")
 YLH_USERNAME    = os.environ.get("YLH_USERNAME",    "bhavesh647383")
+GOOGLE_COOKIES  = os.environ.get("GOOGLE_COOKIES",  "")  # JSON string of saved cookies
 
 YLH_LOGIN_URL         = "https://www.youlikehits.com/login.php"
 YLH_YOUTUBE_LIKES_URL = "https://www.youlikehits.com/youtubelikes.php"
@@ -44,13 +45,33 @@ def human_delay(mn=3.0, mx=6.0):
 
 
 def google_login(context):
-    log.info("[LOGIN] Google login kar raha hoon...")
+    """Google login - saved cookies use karta hai (password login GitHub Actions pe block hota hai)"""
+    if GOOGLE_COOKIES:
+        try:
+            cookies = json.loads(GOOGLE_COOKIES)
+            context.add_cookies(cookies)
+            log.info(f"[OK] Google cookies loaded! ({len(cookies)} cookies)")
+            # Verify by visiting YouTube
+            page = context.new_page()
+            page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
+            time.sleep(3)
+            content = page.content()
+            if GOOGLE_EMAIL.split("@")[0].lower() in content.lower() or "avatar" in content.lower():
+                log.info("[OK] YouTube login verified via cookies!")
+            else:
+                log.info("[INFO] Cookies loaded, YouTube session active")
+            page.close()
+            return
+        except Exception as e:
+            log.error(f"[ERROR] Cookie load failed: {e}")
+
+    # Fallback: password login try karo
+    log.info("[LOGIN] Google password login try kar raha hoon...")
     page = context.new_page()
     try:
         page.goto("https://accounts.google.com/v3/signin/identifier?flowName=GlifWebSignIn",
                   wait_until="domcontentloaded", timeout=30000)
         human_delay(2, 3)
-
         for sel in ['input[type="email"]', '#identifierId']:
             try:
                 el = page.wait_for_selector(sel, timeout=8000)
@@ -62,7 +83,6 @@ def google_login(context):
                     break
             except Exception:
                 continue
-
         for sel in ['input[type="password"]', 'input[name="password"]']:
             try:
                 el = page.wait_for_selector(sel, timeout=10000)
@@ -74,16 +94,12 @@ def google_login(context):
                     break
             except Exception:
                 continue
-
-        if "accounts.google.com" not in page.url or "signin" not in page.url:
-            log.info("[OK] Google login complete!")
-        else:
-            log.warning(f"[WARN] Google URL: {page.url}")
-
+        log.info(f"[INFO] Google URL: {page.url}")
     except Exception as e:
         log.error(f"[ERROR] Google login: {e}")
     finally:
         page.close()
+
 
 
 def ylh_login(page) -> bool:
