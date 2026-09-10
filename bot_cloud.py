@@ -232,22 +232,51 @@ def do_one_like(page, context) -> bool:
             except Exception:
                 pass
 
-        human_delay(2, 3)
+        # Scroll on YouTube before closing (human-like)
+        try:
+            yt_page.mouse.wheel(0, random.randint(200, 500))
+            time.sleep(random.uniform(0.5, 1.5))
+            yt_page.mouse.wheel(0, random.randint(-100, -50))
+        except Exception:
+            pass
+
+        human_delay(2, 4)
         yt_page.close()
 
-        # Step 4: Confirm on YLH
+        # Step 4: Wapas YLH pe aao
         page.bring_to_front()
-        human_delay(2, 3)
+        # Random wait before clicking confirm (human-like - page dekhne jaisa)
+        pre_confirm_wait = random.uniform(3, 7)
+        log.info(f"  >> Confirm se pehle {pre_confirm_wait:.1f}s wait...")
+        time.sleep(pre_confirm_wait)
 
+        # Click 'I'm done - check now'
         for sel in ['#ylhManualBtn', 'button:has-text("done")', 'button:has-text("check now")']:
             try:
                 btn = page.wait_for_selector(sel, timeout=6000)
                 if btn:
+                    # Random mouse movement before click
+                    try:
+                        box = btn.bounding_box()
+                        if box:
+                            # Move to random point near button
+                            page.mouse.move(
+                                box['x'] + random.randint(-30, 30),
+                                box['y'] + random.randint(-20, 20)
+                            )
+                            time.sleep(random.uniform(0.3, 0.8))
+                    except Exception:
+                        pass
                     btn.click()
                     log.info("  [OK] 'I'm done - check now' clicked!")
                     break
             except Exception:
                 continue
+
+        # Confirm click ke BAAD: 8-15 sec random wait (anti-detection)
+        post_confirm_wait = random.uniform(8, 15)
+        log.info(f"  >> Confirm ke baad {post_confirm_wait:.1f}s wait (anti-detection)...")
+        time.sleep(post_confirm_wait)
 
         # Wait for sync
         try:
@@ -324,7 +353,10 @@ def run():
                     log.warning("[WARN] 3 failures, stopping session")
                     break
 
-            human_delay(3, 6)
+            # Next like se pehle: 1-10 sec random wait (har baar alag)
+            next_wait = random.uniform(1, 10)
+            log.info(f"[WAIT] Next like se pehle {next_wait:.1f}s...")
+            time.sleep(next_wait)
 
         duration = datetime.now() - start
         log.info(f"[DONE] Session complete: {total} likes in {duration}")
