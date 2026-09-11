@@ -66,10 +66,10 @@ def human_delay(mn=3.0, mx=6.0):
     time.sleep(random.uniform(mn, mx))
 
 
-def google_login(context):
-    if GOOGLE_COOKIES:
+def google_login(context, cookies_json):
+    if cookies_json:
         try:
-            cookies = json.loads(GOOGLE_COOKIES)
+            cookies = json.loads(cookies_json)
             context.add_cookies(cookies)
             log.info(f"[OK] Google cookies loaded! ({len(cookies)} cookies)")
             page = context.new_page()
@@ -80,57 +80,24 @@ def google_login(context):
             return
         except Exception as e:
             log.error(f"[ERROR] Cookie load failed: {e}")
-
-    log.info("[LOGIN] Google password login try kar raha hoon...")
-    page = context.new_page()
-    try:
-        page.goto("https://accounts.google.com/v3/signin/identifier?flowName=GlifWebSignIn",
-                  wait_until="domcontentloaded", timeout=30000)
-        human_delay(2, 3)
-        for sel in ['input[type="email"]', '#identifierId']:
-            try:
-                el = page.wait_for_selector(sel, timeout=8000)
-                if el:
-                    el.type(GOOGLE_EMAIL, delay=100)
-                    human_delay(0.5, 1)
-                    page.keyboard.press("Enter")
-                    human_delay(2.5, 4)
-                    break
-            except Exception:
-                continue
-        for sel in ['input[type="password"]', 'input[name="password"]']:
-            try:
-                el = page.wait_for_selector(sel, timeout=10000)
-                if el:
-                    el.type(GOOGLE_PASSWORD, delay=100)
-                    human_delay(0.5, 1)
-                    page.keyboard.press("Enter")
-                    human_delay(4, 6)
-                    break
-            except Exception:
-                continue
-        log.info(f"[INFO] Google URL: {page.url}")
-    except Exception as e:
-        log.error(f"[ERROR] Google login: {e}")
-    finally:
-        page.close()
+    log.warning("[WARN] No cookies - skipping Google login")
 
 
-def ylh_login(page) -> bool:
+def ylh_login(page, email, password) -> bool:
     log.info("[LOGIN] YouLikeHits login kar raha hoon...")
     try:
         page.goto(YLH_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
         human_delay(1.5, 2.5)
         page.wait_for_selector("#username", timeout=10000)
-        page.fill("#username", YLH_LOGIN_ID)
+        page.fill("#username", email)
         human_delay(0.4, 0.8)
         page.wait_for_selector("#password", timeout=10000)
-        page.fill("#password", YLH_PASSWORD)
+        page.fill("#password", password)
         human_delay(0.5, 1)
         page.click('input[type="submit"]')
         human_delay(2.5, 4)
         content = page.content()
-        if "Logout" in content or "My Account" in content or YLH_USERNAME in content:
+        if "Logout" in content or "My Account" in content:
             log.info("[OK] YouLikeHits login successful!")
             return True
         log.error("[ERROR] YouLikeHits login fail!")
@@ -417,13 +384,13 @@ def run_account(account: dict) -> str:
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
 
-        google_login(context)
+        google_login(context, cookies_json)
         human_delay(2, 3)
 
         main_page = context.new_page()
-        if not ylh_login(main_page):
+        if not ylh_login(main_page, acc_email, acc_pass):
             browser.close()
-            sys.exit(1)
+            return 'error'
 
         start_pts = get_points(main_page) or 0
         log.info(f"[POINTS] Start: {start_pts}")
