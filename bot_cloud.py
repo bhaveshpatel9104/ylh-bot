@@ -411,18 +411,14 @@ def run_account(account: dict) -> str:
             result = do_one_like(main_page, context, seen_videos)
 
             if result == 'limit':
-                # Daily limit reached - gracefully stop
                 curr = get_points(main_page)
                 elapsed = datetime.now() - start
                 log.info("=" * 50)
-                log.info(f"[DONE] Daily 120 limit complete!")
-                log.info(f"[DONE] Total likes today: {daily_likes}")
-                log.info(f"[DONE] Points earned: +{(curr or start_pts) - start_pts}")
-                log.info(f"[DONE] Total time: {elapsed}")
-                log.info("[DONE] Kal subah phir se chalu hoga automatically!")
+                log.info(f"[ACC {acc_num}] Daily 120 limit! Agle account pe jaate hain.")
+                log.info(f"[ACC {acc_num}] Earned: {daily_likes} likes | +{(curr or start_pts) - start_pts} pts")
                 log.info("=" * 50)
                 browser.close()
-                sys.exit(0)
+                return 'limit'
 
             elif result == 'ok':
                 total_likes += 1
@@ -436,9 +432,9 @@ def run_account(account: dict) -> str:
                     log.info(f"[STATS] Like #{daily_likes}/{DAILY_LIMIT} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
                     prev_pts = curr
                     if daily_likes >= DAILY_LIMIT:
-                        log.info(f"[DONE] {DAILY_LIMIT} successful likes complete! Session band.")
+                        log.info(f"[ACC {acc_num}] {DAILY_LIMIT} likes done! Next account...")
                         browser.close()
-                        sys.exit(0)
+                        return 'done'
                 else:
                     log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT}")
                 # Grid view pe wapas jaao
