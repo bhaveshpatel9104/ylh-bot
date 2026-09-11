@@ -1,8 +1,9 @@
 """
-YouLikeHits Bot - GitHub Actions Continuous Mode
-=================================================
-Continuously likes videos until GitHub Actions timeout.
-Har 6 ghante mein naya session automatically start hota hai.
+YouLikeHits Bot - GitHub Actions Multi-Account Mode
+====================================================
+Har account ki 120 daily like limit achive hone ke baad
+agle account pe switch karta hai.
+Accounts: 5 (120 × 5 = 600 points/day max)
 """
 
 import time
@@ -14,13 +15,39 @@ import json
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-# ---- Credentials from GitHub Secrets ----
-YLH_LOGIN_ID    = os.environ.get("YLH_LOGIN_ID",    "patelbhavesh9130@gmail.com")
-YLH_PASSWORD    = os.environ.get("YLH_PASSWORD",    "BHAVESH91045678VV")
-GOOGLE_EMAIL    = os.environ.get("GOOGLE_EMAIL",    "patelbhavesh9130@gmail.com")
-GOOGLE_PASSWORD = os.environ.get("GOOGLE_PASSWORD", "BHAVESH9104V")
-YLH_USERNAME    = os.environ.get("YLH_USERNAME",    "bhavesh647383")
-GOOGLE_COOKIES  = os.environ.get("GOOGLE_COOKIES",  "")
+# ---- All 5 Accounts ----
+ACCOUNTS = [
+    {
+        "num":    1,
+        "email":  "patelbhavesh9130@gmail.com",
+        "password": "BHAVESH91045678VV",
+        "cookies_env": "GOOGLE_COOKIES",
+    },
+    {
+        "num":    2,
+        "email":  "222lovable222@gmail.com",
+        "password": "BHAVESH91045678VV",
+        "cookies_env": "GOOGLE_COOKIES_2",
+    },
+    {
+        "num":    3,
+        "email":  "anti46286@gmail.com",
+        "password": "BHAVESH91045678VV",
+        "cookies_env": "GOOGLE_COOKIES_3",
+    },
+    {
+        "num":    4,
+        "email":  "vercal400@gmail.com",
+        "password": "BHAVESH91045678VV",
+        "cookies_env": "GOOGLE_COOKIES_4",
+    },
+    {
+        "num":    5,
+        "email":  "a31949377@gmail.com",
+        "password": "BHAVESH91045678VV",
+        "cookies_env": "GOOGLE_COOKIES_5",
+    },
+]
 
 YLH_LOGIN_URL         = "https://www.youlikehits.com/login.php"
 YLH_YOUTUBE_LIKES_URL = "https://www.youlikehits.com/youtubelikes.php"
@@ -353,15 +380,26 @@ def do_one_like(page, context, seen_videos: set) -> str:
         return 'fail'
 
 
-def run():
+def run_account(account: dict) -> str:
+    """
+    Ek account chalao.
+    Returns: 'limit' - daily limit reached, 'done' - 120 likes complete, 'error' - login fail
+    """
+    acc_num   = account["num"]
+    acc_email = account["email"]
+    acc_pass  = account["password"]
+    cookies_json = os.environ.get(account["cookies_env"], "")
+
     log.info("=" * 50)
-    log.info("[BOT] GitHub Actions - Continuous Mode (no stop)")
-    log.info(f"[BOT] Account: {YLH_LOGIN_ID}")
+    log.info(f"[ACCOUNT {acc_num}/5] {acc_email}")
     log.info("=" * 50)
+
+    if not cookies_json:
+        log.warning(f"[SKIP] Account {acc_num}: GOOGLE_COOKIES_{acc_num} not set - skipping!")
+        return 'skip'
 
     start = datetime.now()
     total_likes = 0
-    start_pts = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -488,8 +526,42 @@ def run():
                         pass
                 time.sleep(random.uniform(5, 15))
 
-        # This line never reached - GitHub Actions kills after timeout
+        # Account limit/done - browser close
         browser.close()
+        return 'limit'
+
+
+def run():
+    """5 accounts ko sequentially chalao."""
+    log.info("=" * 50)
+    log.info("[BOT] Multi-Account Mode - 5 accounts")
+    log.info(f"[BOT] Max points/day: 120 x 5 = 600 likes")
+    log.info("=" * 50)
+
+    total_accounts_done = 0
+
+    for account in ACCOUNTS:
+        acc_cookies = os.environ.get(account["cookies_env"], "")
+        if not acc_cookies:
+            log.warning(f"[SKIP] Account {account['num']} ({account['email']}): cookies not set!")
+            continue
+
+        log.info(f"\n>>> Starting Account {account['num']}/5: {account['email']}")
+        result = run_account(account)
+
+        if result in ('limit', 'done'):
+            total_accounts_done += 1
+            log.info(f"[OK] Account {account['num']} done. Moving to next...")
+            time.sleep(10)  # Brief pause before next account
+        elif result == 'skip':
+            log.info(f"[SKIP] Account {account['num']} skipped.")
+        elif result == 'error':
+            log.error(f"[ERROR] Account {account['num']} login failed - skipping.")
+
+    log.info("=" * 50)
+    log.info(f"[DONE] All accounts processed! Total: {total_accounts_done}/5")
+    log.info("[DONE] Kal phir se chalu hoga automatically!")
+    log.info("=" * 50)
 
 
 if __name__ == "__main__":
