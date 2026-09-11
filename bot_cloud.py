@@ -125,17 +125,26 @@ def get_points(page):
     return None
 
 
+DAILY_LIMIT = 120  # YLH daily like limit
+
+
 def do_one_like(page, context, seen_videos: set) -> str:
     """
     Returns:
-      'ok'   - like successful
-      'skip' - duplicate video skipped
-      'fail' - some error
-      'novid'- no videos available
+      'ok'    - like successful (points earned)
+      'ok0'   - like done but 0 points (already liked before)
+      'skip'  - duplicate video skipped
+      'fail'  - some error
+      'novid' - no videos available
+      'limit' - daily 120 like limit reached
     """
     yt_video_id = ""
     try:
         content = page.content()
+        # Daily limit check
+        if "Like Limit Reached" in content or "like limit" in content.lower() or "120 videos" in content:
+            log.warning("[LIMIT] Daily 120 like limit reached! Kal phir milenge.")
+            return 'limit'
         if "No videos" in content or "come back later" in content.lower():
             return 'novid'
 
@@ -388,28 +397,54 @@ def run():
         consecutive_fails = 0
         consecutive_no_vid = 0
         round_num = 1
+        daily_likes = 0      # Points earn karne wale likes
+        prev_pts = start_pts
 
-        log.info("[BOT] Continuous loop shuru - GitHub timeout tak chalega!")
+        log.info(f"[BOT] Continuous loop - Daily limit: {DAILY_LIMIT} likes")
 
         while True:
             result = do_one_like(main_page, context, seen_videos)
 
-            if result == 'ok':
+            if result == 'limit':
+                # Daily limit reached - gracefully stop
+                curr = get_points(main_page)
+                elapsed = datetime.now() - start
+                log.info("=" * 50)
+                log.info(f"[DONE] Daily 120 limit complete!")
+                log.info(f"[DONE] Total likes today: {daily_likes}")
+                log.info(f"[DONE] Points earned: +{(curr or start_pts) - start_pts}")
+                log.info(f"[DONE] Total time: {elapsed}")
+                log.info("[DONE] Kal subah phir se chalu hoga automatically!")
+                log.info("=" * 50)
+                browser.close()
+                sys.exit(0)
+
+            elif result == 'ok':
                 total_likes += 1
                 consecutive_fails = 0
                 consecutive_no_vid = 0
                 curr = get_points(main_page)
                 elapsed = datetime.now() - start
-                if curr:
-                    log.info(f"[STATS] Round {round_num} | Likes: {total_likes} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
-                # Grid view pe wapas jaao (followbutton ke liye)
+                # Check if points actually earned
+                if curr and curr > prev_pts:
+                    daily_likes += 1
+                    log.info(f"[STATS] Like #{daily_likes}/{DAILY_LIMIT} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
+                    prev_pts = curr
+                    if daily_likes >= DAILY_LIMIT:
+                        log.info(f"[DONE] {DAILY_LIMIT} successful likes complete! Session band.")
+                        browser.close()
+                        sys.exit(0)
+                else:
+                    log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT}")
+                # Grid view pe wapas jaao
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
                     human_delay(2, 3)
                 except Exception:
                     pass
-                # Next like wait
                 time.sleep(random.uniform(1, 5))
+
+
 
 
             elif result == 'skip':
