@@ -146,8 +146,19 @@ def do_one_like(page, context, seen_videos: set) -> str:
         except Exception:
             pass
         if not follow_btn:
-            log.warning("[WARN] followbutton nahi mila")
+            # Check WHY followbutton nahi mila
+            page_content = page.content().lower()
+            title = page.title()
+            log.warning(f"[WARN] followbutton nahi mila | Title: {title[:50]}")
+            # Detect various "no more videos" states
+            if any(x in page_content for x in [
+                "no videos", "come back", "no more", "queue", "ran out",
+                "start liking", "login", "sign in"
+            ]):
+                log.info("[WAIT] No videos/session issue detected - novid return")
+                return 'novid'
             return 'fail'
+
         follow_btn.click()
         human_delay(2, 3)
 
