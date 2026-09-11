@@ -379,7 +379,13 @@ def run():
             elif result == 'skip':
                 consecutive_fails = 0
                 consecutive_no_vid = 0
-                time.sleep(random.uniform(1, 5))
+                # Grid pe wapas jaao (skip ke baad bhi followbutton chahiye)
+                try:
+                    main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                    human_delay(2, 3)
+                except Exception:
+                    pass
+                time.sleep(random.uniform(1, 3))
 
             elif result == 'novid':
                 consecutive_no_vid += 1
