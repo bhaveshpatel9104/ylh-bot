@@ -210,8 +210,10 @@ def do_one_like(page, context, seen_videos: set) -> str:
         except Exception:
             pass
 
-        # YouTube Like
+        # YouTube Like - check if already liked
         liked = False
+        already_liked = False
+
         for sel in [
             'button[aria-label*="like this video"]',
             'button[aria-label*="Like this video"]',
@@ -222,36 +224,59 @@ def do_one_like(page, context, seen_videos: set) -> str:
                 btn = yt_page.wait_for_selector(sel, timeout=4000)
                 if btn:
                     pressed = btn.get_attribute("aria-pressed")
-                    if pressed != "true":
+                    if pressed == "true":
+                        log.warning("  [WARN] Video YouTube pe already liked hai - skipping!")
+                        already_liked = True
+                    else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
                         btn.click()
-                    log.info("  [OK] YouTube liked!")
-                    liked = True
+                        log.info("  [OK] YouTube liked! (fresh)")
+                        liked = True
                     break
             except Exception:
                 continue
 
-        if not liked:
+        if not liked and not already_liked:
             try:
-                result = yt_page.evaluate("""
+                js_result = yt_page.evaluate("""
                     () => {
                         const btns = document.querySelectorAll('button');
                         for (const b of btns) {
                             const label = (b.getAttribute('aria-label') || '').toLowerCase();
                             if (label.includes('like') && !label.includes('dislike')) {
-                                if (b.getAttribute('aria-pressed') !== 'true') b.click();
-                                return 'ok: ' + label;
+                                const wasLiked = b.getAttribute('aria-pressed') === 'true';
+                                if (!wasLiked) b.click();
+                                return wasLiked ? 'already_liked: ' + label : 'ok: ' + label;
                             }
                         }
                         return 'not_found';
                     }
                 """)
-                if result != 'not_found':
-                    log.info(f"  [OK] YouTube like JS: {result}")
+                if js_result.startswith('already_liked:'):
+                    log.warning(f"  [WARN] Already liked (JS): {js_result}")
+                    already_liked = True
+                elif js_result.startswith('ok:'):
+                    log.info(f"  [OK] YouTube like JS: {js_result}")
                     liked = True
             except Exception:
                 pass
+
+        # Already liked on YouTube - YLH pe Skip karo, confirm mat karo
+        if already_liked:
+            yt_page.close()
+            page.bring_to_front()
+            log.info("  [SKIP] Already liked - YLH pe Skip click kar raha hoon...")
+            try:
+                skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                if skip_link:
+                    skip_link.click()
+                    human_delay(2, 3)
+            except Exception:
+                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                human_delay(2, 3)
+            return 'skip'
+
 
         human_delay(2, 4)
         yt_page.close()
