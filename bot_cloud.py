@@ -191,11 +191,18 @@ def do_one_like(page, context, seen_videos: set) -> bool:
             log.warning(f"  [SKIP] Video {yt_video_id} already liked - skipping!")
             yt_page.close()
             page.bring_to_front()
+            # Click YLH "Skip" link to go to next video (not go_back which lands on detail view)
             try:
-                page.go_back()
+                skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                if skip_link:
+                    skip_link.click()
+                    log.info("  [SKIP] YLH Skip link clicked!")
+                    human_delay(2, 3)
             except Exception:
-                pass
-            human_delay(3, 5)
+                # Fallback: navigate directly to youtubelikes page
+                log.info("  [SKIP] Skip link nahi mila, page reload kar raha hoon...")
+                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                human_delay(2, 3)
             return False
 
         # Step 3: YouTube scroll (human-like)
