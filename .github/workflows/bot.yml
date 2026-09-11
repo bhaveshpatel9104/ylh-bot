@@ -2,9 +2,8 @@ name: YouLikeHits Points Bot
 
 on:
   schedule:
-    # Har 1 ghante mein run hoga (24/7, laptop band ho toh bhi)
     - cron: '0 * * * *'
-  workflow_dispatch:  # Manual trigger bhi kar sakte ho
+  workflow_dispatch:
 
 jobs:
   earn-points:
@@ -33,7 +32,8 @@ jobs:
           GOOGLE_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
           GOOGLE_PASSWORD: ${{ secrets.GOOGLE_PASSWORD }}
           YLH_USERNAME: ${{ secrets.YLH_USERNAME }}
-          MAX_LIKES: "15"
+          GOOGLE_COOKIES: ${{ secrets.GOOGLE_COOKIES }}
+          MAX_LIKES: "30"
         run: python bot_cloud.py
 
       - name: Upload logs
