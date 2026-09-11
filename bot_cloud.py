@@ -127,18 +127,23 @@ def do_one_like(page, context, seen_videos: set) -> str:
     Returns:
       'ok'    - like successful (points earned)
       'ok0'   - like done but 0 points (already liked before)
-      'skip'  - duplicate video skipped
-      'fail'  - some error
-      'novid' - no videos available
-      'limit' - daily 120 like limit reached
+      'skip'      - duplicate video skipped
+      'fail'      - some error
+      'novid'     - no videos available
+      'hour_limit'  - hourly 30 limit reached (1 hr wait)
+      'daily_limit' - daily 120 limit reached (next account)
     """
     yt_video_id = ""
     try:
         content = page.content()
-        # Daily limit check
-        if "Like Limit Reached" in content or "like limit" in content.lower() or "120 videos" in content:
-            log.warning("[LIMIT] Daily 120 like limit reached! Kal phir milenge.")
-            return 'limit'
+        # Limit check - hourly vs daily
+        if "Like Limit Reached" in content or "like limit" in content.lower():
+            if "hourly" in content.lower() or "per hour" in content.lower() or "30 videos" in content:
+                log.warning("[HOUR_LIMIT] Hourly 30 limit! 65 min baad wapas aayenge.")
+                return 'hour_limit'
+            else:
+                log.warning("[DAILY_LIMIT] Daily 120 limit! Next account pe ja rahe hain.")
+                return 'daily_limit'
         if "No videos" in content or "come back later" in content.lower():
             return 'novid'
 
@@ -410,15 +415,17 @@ def run_account(account: dict) -> str:
         while True:
             result = do_one_like(main_page, context, seen_videos)
 
-            if result == 'limit':
+            if result == 'hour_limit':
                 curr = get_points(main_page)
-                elapsed = datetime.now() - start
-                log.info("=" * 50)
-                log.info(f"[ACC {acc_num}] Daily 120 limit! Agle account pe jaate hain.")
-                log.info(f"[ACC {acc_num}] Earned: {daily_likes} likes | +{(curr or start_pts) - start_pts} pts")
-                log.info("=" * 50)
+                log.info(f"[ACC {acc_num}] Hourly limit! Earned: {daily_likes} likes so far.")
                 browser.close()
-                return 'limit'
+                return 'hour_limit'
+
+            elif result == 'daily_limit':
+                curr = get_points(main_page)
+                log.info(f"[ACC {acc_num}] Daily limit done! Total: {daily_likes} likes.")
+                browser.close()
+                return 'daily_limit'
 
             elif result == 'ok':
                 total_likes += 1
@@ -489,42 +496,85 @@ def run_account(account: dict) -> str:
                         pass
                 time.sleep(random.uniform(5, 15))
 
-        # Account limit/done - browser close
+        # Timeout ya unexpected exit
         browser.close()
-        return 'limit'
+        return 'hour_limit'
 
 
 def run():
-    """5 accounts ko sequentially chalao."""
+    """Round-robin: 5 accounts, hourly cooldown, daily tracking."""
+    from datetime import timedelta
+    HOUR_COOLDOWN_MINS = 65  # 65 min baad retry
+
     log.info("=" * 50)
-    log.info("[BOT] Multi-Account Mode - 5 accounts")
-    log.info(f"[BOT] Max points/day: 120 x 5 = 600 likes")
+    log.info("[BOT] Round-Robin Mode - 5 accounts")
+    log.info("[BOT] Hourly: 30/acc | Daily: 120/acc | Max: 600/day")
     log.info("=" * 50)
 
-    total_accounts_done = 0
+    # State per account
+    states = {}
+    for acc in ACCOUNTS:
+        states[acc['num']] = {
+            'account': acc,
+            'daily_done': False,
+            'cooldown_until': None,
+            'has_cookies': bool(os.environ.get(acc['cookies_env'], '')),
+        }
 
-    for account in ACCOUNTS:
-        acc_cookies = os.environ.get(account["cookies_env"], "")
-        if not acc_cookies:
-            log.warning(f"[SKIP] Account {account['num']} ({account['email']}): cookies not set!")
+    while True:
+        now = datetime.now()
+
+        # Available: has cookies, not daily done, not on cooldown
+        available = [
+            s for s in states.values()
+            if s['has_cookies']
+            and not s['daily_done']
+            and (s['cooldown_until'] is None or now >= s['cooldown_until'])
+        ]
+
+        if not available:
+            # Check future availability
+            future = [
+                s for s in states.values()
+                if s['has_cookies'] and not s['daily_done']
+            ]
+            if not future:
+                log.info("=" * 50)
+                log.info("[DONE] Sabhi 5 accounts ki daily limit ho gayi!")
+                log.info("[DONE] Kal subah phir se chalu hoga!")
+                log.info("=" * 50)
+                break
+
+            # Wait for earliest cooldown
+            cooldowns = [s['cooldown_until'] for s in future if s['cooldown_until']]
+            if cooldowns:
+                next_wake = min(cooldowns)
+                wait_secs = max((next_wake - now).total_seconds(), 0) + 60
+                log.info(f"[WAIT] Sabhi accounts hourly limit pe hain.")
+                log.info(f"[WAIT] Next wakeup: {next_wake.strftime('%H:%M:%S')} ({int(wait_secs/60)} min wait)")
+                time.sleep(wait_secs)
+            else:
+                time.sleep(120)
             continue
 
-        log.info(f"\n>>> Starting Account {account['num']}/5: {account['email']}")
-        result = run_account(account)
+        # Run next available account
+        state = available[0]
+        acc = state['account']
 
-        if result in ('limit', 'done'):
-            total_accounts_done += 1
-            log.info(f"[OK] Account {account['num']} done. Moving to next...")
-            time.sleep(10)  # Brief pause before next account
-        elif result == 'skip':
-            log.info(f"[SKIP] Account {account['num']} skipped.")
+        log.info(f"\n>>> Account {acc['num']}/5: {acc['email']}")
+        result = run_account(acc)
+
+        if result == 'hour_limit':
+            state['cooldown_until'] = datetime.now() + timedelta(minutes=HOUR_COOLDOWN_MINS)
+            log.info(f"[COOL] Account {acc['num']} cooldown until {state['cooldown_until'].strftime('%H:%M')}")
+        elif result in ('daily_limit', 'done'):
+            state['daily_done'] = True
+            log.info(f"[DAILY] Account {acc['num']} daily done!")
         elif result == 'error':
-            log.error(f"[ERROR] Account {account['num']} login failed - skipping.")
+            log.error(f"[ERROR] Account {acc['num']} login failed - skipping")
+            state['daily_done'] = True  # Skip this account
 
-    log.info("=" * 50)
-    log.info(f"[DONE] All accounts processed! Total: {total_accounts_done}/5")
-    log.info("[DONE] Kal phir se chalu hoga automatically!")
-    log.info("=" * 50)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
