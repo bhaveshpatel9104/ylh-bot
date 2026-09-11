@@ -1,8 +1,8 @@
 """
-YouLikeHits Bot - GitHub Actions Session Mode
-==============================================
-Har run mein fixed number of likes karta hai.
-GitHub Actions har ghante automatically chalaata hai.
+YouLikeHits Bot - GitHub Actions Continuous Mode
+=================================================
+Continuously likes videos until GitHub Actions timeout.
+Har 6 ghante mein naya session automatically start hota hai.
 """
 
 import time
@@ -18,15 +18,14 @@ from playwright.sync_api import sync_playwright
 YLH_LOGIN_ID    = os.environ.get("YLH_LOGIN_ID",    "patelbhavesh9130@gmail.com")
 YLH_PASSWORD    = os.environ.get("YLH_PASSWORD",    "BHAVESH91045678VV")
 GOOGLE_EMAIL    = os.environ.get("GOOGLE_EMAIL",    "patelbhavesh9130@gmail.com")
-GOOGLE_PASSWORD = os.environ.get("GOOGLE_PASSWORD", "BHAVESH9104VV")
+GOOGLE_PASSWORD = os.environ.get("GOOGLE_PASSWORD", "BHAVESH9104V")
 YLH_USERNAME    = os.environ.get("YLH_USERNAME",    "bhavesh647383")
-GOOGLE_COOKIES  = os.environ.get("GOOGLE_COOKIES",  "")  # Saved session cookies
+GOOGLE_COOKIES  = os.environ.get("GOOGLE_COOKIES",  "")
 
 YLH_LOGIN_URL         = "https://www.youlikehits.com/login.php"
 YLH_YOUTUBE_LIKES_URL = "https://www.youlikehits.com/youtubelikes.php"
-MAX_LIKES = int(os.environ.get("MAX_LIKES", "15"))
 
-# ---- Logging ----
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -41,7 +40,6 @@ def human_delay(mn=3.0, mx=6.0):
 
 
 def google_login(context):
-    """Google login using saved cookies (password login is blocked on GitHub IPs)"""
     if GOOGLE_COOKIES:
         try:
             cookies = json.loads(GOOGLE_COOKIES)
@@ -56,7 +54,6 @@ def google_login(context):
         except Exception as e:
             log.error(f"[ERROR] Cookie load failed: {e}")
 
-    # Fallback: password login
     log.info("[LOGIN] Google password login try kar raha hoon...")
     page = context.new_page()
     try:
@@ -128,17 +125,21 @@ def get_points(page):
     return None
 
 
-def do_one_like(page, context, seen_videos: set) -> bool:
-    """One complete like cycle with duplicate detection"""
+def do_one_like(page, context, seen_videos: set) -> str:
+    """
+    Returns:
+      'ok'   - like successful
+      'skip' - duplicate video skipped
+      'fail' - some error
+      'novid'- no videos available
+    """
     yt_video_id = ""
     try:
         content = page.content()
         if "No videos" in content or "come back later" in content.lower():
-            log.info("[INFO] No videos available, waiting 60s...")
-            time.sleep(60)
-            return False
+            return 'novid'
 
-        # Step 1: Click followbutton (grid Like button)
+        # Step 1: Click followbutton
         follow_btn = None
         try:
             follow_btn = page.wait_for_selector("a.followbutton", timeout=8000)
@@ -146,11 +147,11 @@ def do_one_like(page, context, seen_videos: set) -> bool:
             pass
         if not follow_btn:
             log.warning("[WARN] followbutton nahi mila")
-            return False
+            return 'fail'
         follow_btn.click()
         human_delay(2, 3)
 
-        # Step 2: Click earn-btn -> YouTube opens
+        # Step 2: Click earn-btn
         earn_btn = None
         try:
             earn_btn = page.wait_for_selector("a.earn-btn", timeout=8000)
@@ -158,7 +159,7 @@ def do_one_like(page, context, seen_videos: set) -> bool:
             pass
         if not earn_btn:
             log.warning("[WARN] earn-btn nahi mila")
-            return False
+            return 'fail'
 
         try:
             with context.expect_page(timeout=10000) as new_page_info:
@@ -172,7 +173,7 @@ def do_one_like(page, context, seen_videos: set) -> bool:
 
         if not yt_page:
             log.warning("[WARN] YouTube tab nahi khula")
-            return False
+            return 'fail'
 
         try:
             yt_page.wait_for_load_state("networkidle", timeout=15000)
@@ -180,18 +181,16 @@ def do_one_like(page, context, seen_videos: set) -> bool:
             human_delay(4, 5)
 
         yt_url = yt_page.url
-        # Extract video ID
         if "watch?v=" in yt_url:
             yt_video_id = yt_url.split("watch?v=")[1].split("&")[0]
 
         log.info(f"  >> YouTube: {yt_url[:70]} | ID: {yt_video_id}")
 
-        # DUPLICATE CHECK - already liked this video?
+        # DUPLICATE CHECK
         if yt_video_id and yt_video_id in seen_videos:
             log.warning(f"  [SKIP] Video {yt_video_id} already liked - skipping!")
             yt_page.close()
             page.bring_to_front()
-            # Click YLH "Skip" link to go to next video (not go_back which lands on detail view)
             try:
                 skip_link = page.wait_for_selector("text=Skip", timeout=3000)
                 if skip_link:
@@ -199,13 +198,11 @@ def do_one_like(page, context, seen_videos: set) -> bool:
                     log.info("  [SKIP] YLH Skip link clicked!")
                     human_delay(2, 3)
             except Exception:
-                # Fallback: navigate directly to youtubelikes page
-                log.info("  [SKIP] Skip link nahi mila, page reload kar raha hoon...")
                 page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
                 human_delay(2, 3)
-            return False
+            return 'skip'
 
-        # Step 3: YouTube scroll (human-like)
+        # YouTube scroll
         try:
             yt_page.mouse.wheel(0, random.randint(200, 500))
             time.sleep(random.uniform(0.5, 1.5))
@@ -213,7 +210,7 @@ def do_one_like(page, context, seen_videos: set) -> bool:
         except Exception:
             pass
 
-        # Step 4: YouTube Like
+        # YouTube Like
         liked = False
         for sel in [
             'button[aria-label*="like this video"]',
@@ -258,14 +255,14 @@ def do_one_like(page, context, seen_videos: set) -> bool:
 
         human_delay(2, 4)
         yt_page.close()
-
-        # Step 5: Back to YLH - wait before confirm (human-like)
         page.bring_to_front()
+
+        # Pre-confirm wait
         pre_confirm = random.uniform(3, 7)
         log.info(f"  >> Pre-confirm wait: {pre_confirm:.1f}s")
         time.sleep(pre_confirm)
 
-        # Click "I'm done - check now"
+        # Click confirm
         for sel in ['#ylhManualBtn', 'button:has-text("done")', 'button:has-text("check now")']:
             try:
                 btn = page.wait_for_selector(sel, timeout=6000)
@@ -286,12 +283,12 @@ def do_one_like(page, context, seen_videos: set) -> bool:
             except Exception:
                 continue
 
-        # Anti-detection: 8-15 sec random wait after confirm
+        # Post-confirm wait
         post_confirm = random.uniform(8, 15)
         log.info(f"  >> Post-confirm wait: {post_confirm:.1f}s (anti-detection)")
         time.sleep(post_confirm)
 
-        # Wait for sync
+        # Sync wait
         try:
             page.wait_for_selector("text=Syncing", timeout=8000)
             page.wait_for_selector("text=Syncing", state="hidden", timeout=30000)
@@ -299,26 +296,27 @@ def do_one_like(page, context, seen_videos: set) -> bool:
         except Exception:
             human_delay(5, 8)
 
-        # Track this video ID
+        # Track video
         if yt_video_id:
             seen_videos.add(yt_video_id)
-            log.info(f"  [TRACK] {yt_video_id} added ({len(seen_videos)} total tracked)")
+            log.info(f"  [TRACK] {yt_video_id} tracked ({len(seen_videos)} total)")
 
-        return True
+        return 'ok'
 
     except Exception as e:
         log.error(f"[ERROR] do_one_like: {e}")
-        return False
+        return 'fail'
 
 
 def run():
     log.info("=" * 50)
-    log.info(f"[BOT] GitHub Actions Session - Max {MAX_LIKES} likes")
+    log.info("[BOT] GitHub Actions - Continuous Mode (no stop)")
     log.info(f"[BOT] Account: {YLH_LOGIN_ID}")
     log.info("=" * 50)
 
-    total = 0
     start = datetime.now()
+    total_likes = 0
+    start_pts = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -350,42 +348,63 @@ def run():
         main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
         human_delay(2, 3)
 
-        failures = 0
-        consecutive_skips = 0
-        seen_videos = set()  # Track already-processed video IDs
+        seen_videos = set()
+        consecutive_fails = 0
+        consecutive_no_vid = 0
+        round_num = 1
 
-        while total < MAX_LIKES:
-            log.info(f"[Like #{total+1}/{MAX_LIKES}] (seen: {len(seen_videos)} videos)")
-            try:
-                main_page.reload(wait_until="domcontentloaded", timeout=30000)
-                human_delay(2, 3)
-            except Exception:
-                pass
+        log.info("[BOT] Continuous loop shuru - GitHub timeout tak chalega!")
 
-            if do_one_like(main_page, context, seen_videos):
-                total += 1
-                failures = 0
-                consecutive_skips = 0
+        while True:
+            result = do_one_like(main_page, context, seen_videos)
+
+            if result == 'ok':
+                total_likes += 1
+                consecutive_fails = 0
+                consecutive_no_vid = 0
                 curr = get_points(main_page)
+                elapsed = datetime.now() - start
                 if curr:
-                    log.info(f"[STATS] Likes: {total} | Points: {curr} | +{curr - start_pts}")
-            else:
-                failures += 1
-                consecutive_skips += 1
-                if consecutive_skips >= 5:
-                    log.warning("[WARN] 5 duplicate videos in a row - no new videos. Stopping.")
-                    break
-                if failures >= 3 and consecutive_skips < 5:
-                    log.warning("[WARN] 3 failures, stopping session")
-                    break
+                    log.info(f"[STATS] Round {round_num} | Likes: {total_likes} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
+                # Next like wait
+                time.sleep(random.uniform(1, 8))
 
-            # Random wait before next like (1-10 sec, anti-detection)
-            next_wait = random.uniform(1, 10)
-            log.info(f"[WAIT] Next like in {next_wait:.1f}s...")
-            time.sleep(next_wait)
+            elif result == 'skip':
+                consecutive_fails = 0
+                consecutive_no_vid = 0
+                time.sleep(random.uniform(1, 5))
 
-        duration = datetime.now() - start
-        log.info(f"[DONE] Session complete: {total} likes in {duration}")
+            elif result == 'novid':
+                consecutive_no_vid += 1
+                log.info(f"[WAIT] No videos available (#{consecutive_no_vid}) - 5 min wait...")
+                if consecutive_no_vid >= 3:
+                    # Reset seen videos - purane videos phir available ho sakte hain
+                    log.info("[RESET] seen_videos reset kar raha hoon - naye videos ke liye")
+                    seen_videos = set()
+                    consecutive_no_vid = 0
+                    round_num += 1
+                time.sleep(300)  # 5 min wait
+                # Reload page
+                try:
+                    main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
+                    human_delay(2, 3)
+                except Exception:
+                    pass
+
+            elif result == 'fail':
+                consecutive_fails += 1
+                log.warning(f"[WARN] Fail #{consecutive_fails}")
+                if consecutive_fails >= 5:
+                    log.warning("[WARN] 5 consecutive fails - page reload kar raha hoon")
+                    consecutive_fails = 0
+                    try:
+                        main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
+                        human_delay(3, 5)
+                    except Exception:
+                        pass
+                time.sleep(random.uniform(5, 15))
+
+        # This line never reached - GitHub Actions kills after timeout
         browser.close()
 
 
