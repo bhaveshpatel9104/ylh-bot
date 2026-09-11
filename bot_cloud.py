@@ -366,8 +366,15 @@ def run():
                 elapsed = datetime.now() - start
                 if curr:
                     log.info(f"[STATS] Round {round_num} | Likes: {total_likes} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
+                # Grid view pe wapas jaao (followbutton ke liye)
+                try:
+                    main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                    human_delay(2, 3)
+                except Exception:
+                    pass
                 # Next like wait
-                time.sleep(random.uniform(1, 8))
+                time.sleep(random.uniform(1, 5))
+
 
             elif result == 'skip':
                 consecutive_fails = 0
