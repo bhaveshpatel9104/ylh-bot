@@ -395,6 +395,22 @@ def do_one_like(page, context, seen_videos: set) -> str:
 
         # DUPLICATE CHECK - verify on YouTube first (don't blindly skip!)
         if yt_video_id and yt_video_id in seen_videos:
+            # FINAL marker check - permanently skip if tried twice already
+            final_key = yt_video_id + "_FINAL"
+            if final_key in seen_videos:
+                log.warning(f"  [HARD_SKIP] {yt_video_id} - 2 baar try kar chuke, permanently skip!")
+                yt_page.close()
+                page.bring_to_front()
+                try:
+                    skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                    if skip_link:
+                        skip_link.click()
+                        human_delay(2, 3)
+                except Exception:
+                    page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                    human_delay(2, 3)
+                return 'skip'
+
             log.warning(f"  [DUP] Video {yt_video_id} seen before - YouTube pe verify kar raha hoon...")
             # Check if video is ACTUALLY liked on YouTube
             actually_liked = False
@@ -413,7 +429,6 @@ def do_one_like(page, context, seen_videos: set) -> str:
                     except Exception:
                         continue
                 if not actually_liked:
-                    # JS fallback check
                     result = yt_page.evaluate("""
                         () => {
                             const btns = document.querySelectorAll('button');
@@ -429,7 +444,7 @@ def do_one_like(page, context, seen_videos: set) -> str:
                     actually_liked = bool(result)
             except Exception as e:
                 log.warning(f"  [DUP] YouTube check error: {e} - skipping to be safe")
-                actually_liked = True  # safe fallback
+                actually_liked = True
 
             if actually_liked:
                 log.info(f"  [DUP] {yt_video_id} YouTube pe liked hai - YLH Skip")
@@ -446,9 +461,11 @@ def do_one_like(page, context, seen_videos: set) -> str:
                     human_delay(2, 3)
                 return 'skip'
             else:
-                log.info(f"  [DUP] {yt_video_id} YouTube pe liked NAHI! Like karke points earn karte hain!")
-                seen_videos.discard(yt_video_id)  # Allow re-tracking
-                # Continue to like logic below (don't return here)
+                log.info(f"  [DUP] {yt_video_id} NOT liked - ek baar aur try karte hain!")
+                # Mark as FINAL so next DUP attempt = hard skip
+                seen_videos.add(final_key)
+                seen_videos.discard(yt_video_id)
+                # Continue to like logic below
 
 
         # YouTube scroll
