@@ -67,6 +67,21 @@ def human_delay(mn=3.0, mx=6.0):
     time.sleep(random.uniform(mn, mx))
 
 
+def get_cookies(acc: dict) -> str:
+    """Load cookies: env var (GitHub Actions) OR local JSON file (local test)"""
+    val = os.environ.get(acc["cookies_env"], "")
+    if val:
+        return val
+    # Local fallback: read from file
+    num = acc["num"]
+    fname = f"google_cookies{'_'+str(num) if num > 1 else ''}.json"
+    if os.path.exists(fname):
+        with open(fname, encoding="utf-8") as f:
+            log.info(f"[LOCAL] Cookies from file: {fname}")
+            return f.read()
+    return ""
+
+
 def google_login(context, cookies_json):
     if cookies_json:
         try:
@@ -234,7 +249,7 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
     """Run views for an account for up to duration_seconds."""
     acc_num   = account["num"]
     acc_email = account["email"]
-    cookies_json = os.environ.get(account["cookies_env"], "")
+    cookies_json = get_cookies(account)
 
     if not cookies_json:
         return
@@ -688,7 +703,7 @@ def run_account(account: dict) -> str:
     acc_num   = account["num"]
     acc_email = account["email"]
     acc_pass  = account["password"]
-    cookies_json = os.environ.get(account["cookies_env"], "")
+    cookies_json = get_cookies(account)
 
     log.info("=" * 50)
     log.info(f"[ACCOUNT {acc_num}/5] {acc_email}")
@@ -858,7 +873,7 @@ def run():
             'account': acc,
             'daily_done': False,
             'cooldown_until': None,
-            'has_cookies': bool(os.environ.get(acc['cookies_env'], '')),
+            'has_cookies': bool(get_cookies(acc)),
         }
 
     while True:
