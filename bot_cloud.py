@@ -162,20 +162,67 @@ def youtube_is_signed_in(page) -> bool:
 
 
 def save_context_cookies(context, acc):
-    if not acc or os.environ.get("GITHUB_ACTIONS"):
-        return
+    """Save fresh cookies after successful login. Works locally AND on GitHub Actions."""
     try:
-        fname = cookie_filename(acc)
         cookies = context.cookies()
-        with open(fname, "w", encoding="utf-8") as f:
-            json.dump(cookies, f)
-        log.info(f"[OK] Cookies refreshed -> {fname} ({len(cookies)})")
+        # Always save locally if cookie file exists
+        fname = cookie_filename(acc) if acc else None
+        if fname:
+            with open(fname, "w", encoding="utf-8") as f:
+                json.dump(cookies, f)
+            log.info(f"[OK] Cookies refreshed -> {fname} ({len(cookies)})")
+
+        # On GitHub Actions: auto-update the GitHub Secret with fresh cookies
+        if os.environ.get("GITHUB_ACTIONS") and acc:
+            _update_github_secret(acc, cookies)
     except Exception as e:
         log.warning(f"[WARN] Cookie save failed: {e}")
 
 
+def _update_github_secret(acc, cookies):
+    """Auto-update GitHub Secret with fresh cookies (permanent session fix)."""
+    try:
+        import base64, urllib.request
+        token = os.environ.get("GITHUB_TOKEN", "")
+        repo  = os.environ.get("GITHUB_REPOSITORY", "")
+        if not token or not repo:
+            return
+        acc_num = acc if isinstance(acc, int) else None
+        if not acc_num:
+            return
+        secret_name = "GOOGLE_COOKIES" if acc_num == 1 else f"GOOGLE_COOKIES_{acc_num}"
+        # Get repo public key for secret encryption
+        api_base = f"https://api.github.com/repos/{repo}"
+        req = urllib.request.Request(
+            f"{api_base}/actions/secrets/public-key",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3+json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            pk_data = json.loads(r.read())
+        # Encrypt secret value using PyNaCl if available
+        try:
+            from nacl import encoding, public
+            pk_bytes = base64.b64decode(pk_data["key"])
+            pub_key = public.PublicKey(pk_bytes)
+            box = public.SealedBox(pub_key)
+            encrypted = base64.b64encode(box.encrypt(json.dumps(cookies).encode())).decode()
+            update_req = urllib.request.Request(
+                f"{api_base}/actions/secrets/{secret_name}",
+                data=json.dumps({"encrypted_value": encrypted, "key_id": pk_data["key_id"]}).encode(),
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3+json",
+                         "Content-Type": "application/json"},
+                method="PUT"
+            )
+            urllib.request.urlopen(update_req, timeout=10)
+            log.info(f"[OK] GitHub Secret '{secret_name}' auto-updated with fresh cookies!")
+        except ImportError:
+            log.info("[INFO] PyNaCl not available - Secret auto-update skipped (install PyNaCl for this)")
+    except Exception as e:
+        log.warning(f"[WARN] GitHub Secret update failed: {e}")
+
+
 def google_login(context, cookies_json, acc=None) -> bool:
-    """Return True only if YouTube is actually signed in (avatar / ytcfg LOGGED_IN)."""
+    """Return True only if YouTube is signed in AND API session is valid (not 401)."""
     if cookies_json:
         try:
             cookies = prepare_cookies(json.loads(cookies_json))
@@ -192,7 +239,7 @@ def google_login(context, cookies_json, acc=None) -> bool:
             time.sleep(2)
         except Exception:
             pass
-        # Use networkidle so YouTube JS (ytcfg, avatar) fully initializes
+        # networkidle so YouTube JS (ytcfg, avatar) fully initializes
         try:
             page.goto("https://www.youtube.com", wait_until="networkidle", timeout=30000)
         except Exception:
@@ -200,14 +247,28 @@ def google_login(context, cookies_json, acc=None) -> bool:
                 page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
             except Exception:
                 pass
-        time.sleep(5)  # Extra wait for avatar element to render
+        time.sleep(5)
         signed_in = youtube_is_signed_in(page)
         if signed_in:
+            # PERMANENT FIX: Also verify API session is valid (not just UI)
             log.info("[OK] YouTube SIGNED IN (session real hai)")
+            log.info("[CHECK] API session health check...")
+            health = yt_session_health_check(page, "jNQXAC9IVRw")  # Oldest YT video
+            if health == '401':
+                log.error("[SESSION] 401 UNAUTHENTICATED — session revoked by Google!")
+                log.error("[SESSION] Yeh tab hota hai jab same cookies alag-alag IPs se use hon.")
+                log.error("[SESSION] FIX: Fresh cookies export karo aur GitHub Secret update karo.")
+                page.close()
+                return False  # Skip this account — session is dead
+            elif health == 'ok':
+                log.info("[SESSION] API session healthy! (like API working)")
+                save_context_cookies(context, acc)
+            else:
+                log.info("[SESSION] API check inconclusive — proceeding anyway")
             page.close()
             return True
 
-        log.warning("[WARN] YouTube NOT signed in — cookies stale / rejected (Sign in dikh raha hai)")
+        log.warning("[WARN] YouTube NOT signed in — cookies stale / rejected")
         if os.environ.get("GITHUB_ACTIONS"):
             page.close()
             return False
@@ -580,6 +641,7 @@ def yt_api_like(yt_page, video_id: str) -> bool:
                     };
 
                     // Try with key, then without
+                    let lastStatus = 0;
                     const urls = key
                         ? ['/youtubei/v1/like/like?key=' + key, '/youtubei/v1/like/like']
                         : ['/youtubei/v1/like/like'];
@@ -594,8 +656,9 @@ def yt_api_like(yt_page, video_id: str) -> bool:
                             return {ok: true, status: resp.status};
                         }
                         if (resp.status !== 400) break;
+                        lastStatus = resp.status;
                     }
-                    return {ok: false, status: 400};
+                    return {ok: false, status: lastStatus || 400};
                 } catch(e) {
                     return {ok: false, error: String(e)};
                 }
@@ -613,6 +676,51 @@ def yt_api_like(yt_page, video_id: str) -> bool:
         return False
 
 
+def yt_session_health_check(yt_page, video_id: str) -> str:
+    """Quick API health check. Returns 'ok', '401', or 'error'."""
+    try:
+        result = yt_page.evaluate("""
+            async (videoId) => {
+                let sapisid = '';
+                document.cookie.split(';').forEach(c => {
+                    c = c.trim();
+                    if (c.startsWith('__Secure-3PAPISID=')) sapisid = c.split('=').slice(1).join('=');
+                    else if (!sapisid && c.startsWith('SAPISID=')) sapisid = c.split('=').slice(1).join('=');
+                });
+                if (!sapisid) return {status: 'no_sapisid'};
+                const ts = Math.floor(Date.now() / 1000);
+                const msgBuf = new TextEncoder().encode(ts + ' ' + sapisid + ' https://www.youtube.com');
+                const hashBuf = await crypto.subtle.digest('SHA-1', msgBuf);
+                const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2,'0')).join('');
+                const ytc = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg : null;
+                const key = ytc ? (ytc.get('INNERTUBE_API_KEY') || '') : '';
+                const cv  = ytc ? (ytc.get('INNERTUBE_CLIENT_VERSION') || '2.20240101.00.00') : '2.20240101.00.00';
+                const url = '/youtubei/v1/like/like' + (key ? '?key=' + key : '');
+                const resp = await fetch(url, {
+                    method: 'POST', credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'SAPISIDHASH ' + ts + '_' + hashHex,
+                        'X-Goog-AuthUser': '0', 'X-Origin': 'https://www.youtube.com',
+                        'X-Youtube-Client-Name': '1', 'X-Youtube-Client-Version': cv,
+                    },
+                    body: JSON.stringify({
+                        context: {client: {clientName:'WEB',clientVersion:cv},user:{lockedSafetyMode:false}},
+                        target: {videoId: videoId}
+                    })
+                });
+                return {httpStatus: resp.status, ok: resp.ok};
+            }
+        """, video_id)
+        status = result.get('httpStatus', 0) if result else 0
+        if result and result.get('ok'): return 'ok'  # Like succeeded!
+        if status == 401: return '401'
+        return 'error'
+    except Exception:
+        return 'error'
+
+
+def do_one_view(views_page, context, seen_views: set) -> str:
     """
     Returns:
       'ok'             - view successful, points earned
