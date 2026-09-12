@@ -318,7 +318,7 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
     log.info(f"[VIEWS] Acc {acc_num} session done: {view_count} total views")
 
 
-def do_one_like(page, context, seen_videos: set) -> str:
+def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str:
     """
     Returns:
       'ok'    - like successful (points earned)
@@ -403,78 +403,124 @@ def do_one_like(page, context, seen_videos: set) -> str:
 
         # DUPLICATE CHECK - verify on YouTube first (don't blindly skip!)
         if yt_video_id and yt_video_id in seen_videos:
-            # FINAL marker check - permanently skip if tried twice already
+            # NOPT marker: already done + 0 pts task — verify liked then skip
+            nopt_key  = yt_video_id + "_NOPT"
             final_key = yt_video_id + "_FINAL"
-            if final_key in seen_videos:
-                log.warning(f"  [HARD_SKIP] {yt_video_id} - 2 baar try kar chuke, permanently skip!")
-                yt_page.close()
-                page.bring_to_front()
-                try:
-                    skip_link = page.wait_for_selector("text=Skip", timeout=3000)
-                    if skip_link:
-                        skip_link.click()
-                        human_delay(2, 3)
-                except Exception:
-                    page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
-                    human_delay(2, 3)
-                return 'skip'
 
-            log.warning(f"  [DUP] Video {yt_video_id} seen before - YouTube pe verify kar raha hoon...")
-            # Check if video is ACTUALLY liked on YouTube
-            actually_liked = False
-            try:
-                yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
-                for sel in [
-                    'button[aria-label*="like this video"]',
-                    'button[aria-label*="Like this video"]',
-                    '#segmented-like-button button',
-                ]:
-                    try:
-                        btn = yt_page.wait_for_selector(sel, timeout=3000)
-                        if btn:
-                            actually_liked = (btn.get_attribute("aria-pressed") == "true")
-                            break
-                    except Exception:
-                        continue
-                if not actually_liked:
-                    result = yt_page.evaluate("""
-                        () => {
-                            const btns = document.querySelectorAll('button');
-                            for (const b of btns) {
-                                const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                                if (label.includes('like') && !label.includes('dislike')) {
-                                    return b.getAttribute('aria-pressed') === 'true';
+            if nopt_key in seen_videos or final_key in seen_videos:
+                # Verify quickly: is it actually liked on YouTube?
+                log.info(f"  [NOPT/FINAL] {yt_video_id} - quick verify...")
+                is_liked = False
+                try:
+                    yt_page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    time.sleep(1.5)  # Let React render
+                    for sel in [
+                        '#segmented-like-button button[aria-pressed]',
+                        'button[aria-label*="like this video"]',
+                        'button[aria-label*="Like this video"]',
+                        'ytd-segmented-like-dislike-button-renderer button',
+                        'yt-button-shape button[aria-pressed]',
+                    ]:
+                        try:
+                            btn = yt_page.wait_for_selector(sel, timeout=3000)
+                            if btn:
+                                label = (btn.get_attribute('aria-label') or '').lower()
+                                if 'dislike' not in label:
+                                    is_liked = btn.get_attribute('aria-pressed') == 'true'
+                                    break
+                        except Exception:
+                            pass
+                    if not is_liked:
+                        is_liked = bool(yt_page.evaluate("""
+                            () => {
+                                const btns = document.querySelectorAll('button');
+                                for (const b of btns) {
+                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
+                                    if (l.includes('like') && !l.includes('dislike'))
+                                        return b.getAttribute('aria-pressed') === 'true';
                                 }
+                                return false;
                             }
-                            return false;
-                        }
-                    """)
-                    actually_liked = bool(result)
-            except Exception as e:
-                log.warning(f"  [DUP] YouTube check error: {e} - skipping to be safe")
-                actually_liked = True
+                        """))
+                except Exception:
+                    is_liked = True  # Assume liked if can't verify
 
-            if actually_liked:
-                log.info(f"  [DUP] {yt_video_id} YouTube pe liked hai - YLH Skip")
                 yt_page.close()
                 page.bring_to_front()
-                try:
-                    skip_link = page.wait_for_selector("text=Skip", timeout=3000)
-                    if skip_link:
-                        skip_link.click()
-                        log.info("  [SKIP] YLH Skip link clicked!")
+                if is_liked:
+                    log.info(f"  [SKIP] {yt_video_id} liked ✓ - YLH task skip")
+                    try:
+                        skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                        if skip_link:
+                            skip_link.click()
+                            human_delay(2, 3)
+                    except Exception:
+                        page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
                         human_delay(2, 3)
-                except Exception:
-                    page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
-                    human_delay(2, 3)
-                return 'skip'
-            else:
-                log.info(f"  [DUP] {yt_video_id} NOT liked - ek baar aur try karte hain!")
-                # Mark as FINAL so next DUP attempt = hard skip
-                seen_videos.add(final_key)
-                seen_videos.discard(yt_video_id)
-                # Continue to like logic below
+                    return 'skip'
+                else:
+                    log.warning(f"  [!] {yt_video_id} NOT liked even after attempts - trying once more")
+                    seen_videos.discard(nopt_key)
+                    seen_videos.discard(final_key)
+                    # Continue to like logic below
 
+            else:
+                # First DUP: verify then try once more
+                log.warning(f"  [DUP] Video {yt_video_id} seen before - YouTube pe verify kar raha hoon...")
+                actually_liked = False
+                try:
+                    yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    time.sleep(1.5)
+                    for sel in [
+                        '#segmented-like-button button[aria-pressed]',
+                        'button[aria-label*="like this video"]',
+                        'button[aria-label*="Like this video"]',
+                        'ytd-segmented-like-dislike-button-renderer button',
+                        'yt-button-shape button[aria-pressed]',
+                    ]:
+                        try:
+                            btn = yt_page.wait_for_selector(sel, timeout=4000)
+                            if btn:
+                                label = (btn.get_attribute('aria-label') or '').lower()
+                                if 'dislike' not in label:
+                                    actually_liked = btn.get_attribute('aria-pressed') == 'true'
+                                    break
+                        except Exception:
+                            pass
+                    if not actually_liked:
+                        actually_liked = bool(yt_page.evaluate("""
+                            () => {
+                                const btns = document.querySelectorAll('button');
+                                for (const b of btns) {
+                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
+                                    if (l.includes('like') && !l.includes('dislike'))
+                                        return b.getAttribute('aria-pressed') === 'true';
+                                }
+                                return false;
+                            }
+                        """))
+                except Exception as e:
+                    log.warning(f"  [DUP] verify error: {e} - assuming liked")
+                    actually_liked = True
+
+                if actually_liked:
+                    log.info(f"  [DUP] {yt_video_id} YouTube pe liked hai - skip")
+                    yt_page.close()
+                    page.bring_to_front()
+                    try:
+                        skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                        if skip_link:
+                            skip_link.click()
+                            human_delay(2, 3)
+                    except Exception:
+                        page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                        human_delay(2, 3)
+                    return 'skip'
+                else:
+                    log.info(f"  [DUP] {yt_video_id} NOT liked - try karte hain, FINAL mark lagega")
+                    seen_videos.add(yt_video_id + "_FINAL")
+                    seen_videos.discard(yt_video_id)
+                    # Continue to like logic
 
         # Wait for YouTube page to be fully interactive
         try:
@@ -623,6 +669,8 @@ def do_one_like(page, context, seen_videos: set) -> str:
         # Track video
         if yt_video_id:
             seen_videos.add(yt_video_id)
+            if last_video is not None:
+                last_video[0] = yt_video_id
             log.info(f"  [TRACK] {yt_video_id} tracked ({len(seen_videos)} total)")
 
         return 'ok'
@@ -692,6 +740,7 @@ def run_account(account: dict) -> str:
         human_delay(2, 3)
 
         seen_videos = set()
+        last_video  = [None]   # Tracks last liked video_id for NOPT marking
         consecutive_fails = 0
         consecutive_no_vid = 0
         round_num = 1
@@ -701,7 +750,7 @@ def run_account(account: dict) -> str:
         log.info(f"[BOT] Continuous loop - Daily limit: {DAILY_LIMIT} likes")
 
         while True:
-            result = do_one_like(main_page, context, seen_videos)
+            result = do_one_like(main_page, context, seen_videos, last_video)
 
             if result == 'hour_limit':
                 curr = get_points(main_page)
@@ -731,6 +780,9 @@ def run_account(account: dict) -> str:
                         browser.close()
                         return 'done'
                 else:
+                    vid = last_video[0]
+                    if vid:
+                        seen_videos.add(vid + "_NOPT")  # Mark: 0-pts task, skip next time
                     log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT}")
                 # Grid view pe wapas jaao
                 try:
