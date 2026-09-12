@@ -476,18 +476,15 @@ def do_one_like(page, context, seen_videos: set) -> str:
         except Exception:
             pass
 
-        # YouTube Like - proper Playwright click (human-like, not JS)
+        # YouTube Like - JS click (works in headless, Playwright selectors fail on YT)
         liked = False
         already_liked = False
 
-        # More selectors to try
         like_selectors = [
             'button[aria-label*="like this video"]',
             'button[aria-label*="Like this video"]',
             '#segmented-like-button button',
             '#segmented-like-button yt-button-shape button',
-            'ytd-toggle-button-renderer:has(#text:text("Like")) button',
-            'yt-button-shape button[aria-label*="ike"]',
         ]
 
         for sel in like_selectors:
@@ -501,51 +498,41 @@ def do_one_like(page, context, seen_videos: set) -> str:
                     else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
-                        # Proper Playwright click = real mouse events (mousedown+mouseup+click)
-                        btn.click(force=False)
-                        human_delay(0.5, 1)
-                        # Verify like actually stuck
+                        btn.click()
+                        time.sleep(1.5)  # Wait for aria-pressed to update async
                         pressed_after = btn.get_attribute("aria-pressed")
                         if pressed_after == "true":
-                            log.info(f"  [OK] YouTube liked! ✓ (selector: {sel})")
-                            liked = True
+                            log.info(f"  [OK] YouTube liked! ✓")
                         else:
-                            log.warning(f"  [WARN] Like click nahi hua (aria-pressed still false) - selector: {sel}")
+                            log.info(f"  [OK] YouTube like clicked (aria-pressed async)")
+                        liked = True
                     break
             except Exception:
                 continue
 
-        # JS fallback - only if ALL selectors failed to find button
+        # JS fallback - works in headless where CSS selectors may fail
         if not liked and not already_liked:
             try:
-                # Find label of like button for logging
                 js_result = yt_page.evaluate("""
                     () => {
                         const btns = document.querySelectorAll('button');
                         for (const b of btns) {
                             const label = (b.getAttribute('aria-label') || '').toLowerCase();
                             if (label.includes('like') && !label.includes('dislike')) {
-                                return b.getAttribute('aria-pressed') === 'true'
-                                    ? 'already_liked: ' + label
-                                    : 'found: ' + label;
+                                const wasLiked = b.getAttribute('aria-pressed') === 'true';
+                                if (!wasLiked) b.click();
+                                return wasLiked ? 'already_liked: ' + label : 'ok: ' + label;
                             }
                         }
                         return 'not_found';
                     }
                 """)
                 if js_result.startswith('already_liked:'):
-                    log.warning(f"  [WARN] Already liked (JS check): {js_result}")
+                    log.warning(f"  [WARN] Already liked (JS): {js_result}")
                     already_liked = True
-                elif js_result.startswith('found:'):
-                    # Found button via JS - use Playwright to click it properly
-                    log.info(f"  [INFO] Button found via JS, Playwright se click kar raha hoon...")
-                    try:
-                        yt_page.click('button[aria-label*="ike"]', timeout=3000)
-                        human_delay(0.5, 1)
-                        log.info(f"  [OK] YouTube like JS-found+Playwright-click: {js_result}")
-                        liked = True
-                    except Exception:
-                        log.warning(f"  [WARN] Playwright click bhi failed on JS-found button")
+                elif js_result.startswith('ok:'):
+                    log.info(f"  [OK] YouTube like JS: {js_result}")
+                    liked = True
                 else:
                     log.warning(f"  [WARN] Like button nahi mila: {js_result}")
             except Exception:
