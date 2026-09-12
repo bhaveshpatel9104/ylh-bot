@@ -476,29 +476,44 @@ def do_one_like(page, context, seen_videos: set) -> str:
                 # Continue to like logic below
 
 
-        # YouTube scroll
+        # Wait for YouTube page to be fully interactive
         try:
-            yt_page.mouse.wheel(0, random.randint(200, 500))
-            time.sleep(random.uniform(0.5, 1.5))
-            yt_page.mouse.wheel(0, random.randint(-100, -50))
+            yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
+            time.sleep(2)  # Extra wait for React components to render
         except Exception:
             pass
 
-        # YouTube Like - JS click (works in headless, Playwright selectors fail on YT)
+        # Scroll to like button area
+        try:
+            yt_page.mouse.wheel(0, random.randint(200, 400))
+            time.sleep(random.uniform(0.5, 1))
+            yt_page.mouse.wheel(0, random.randint(-50, -100))
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        # YouTube Like - try Playwright selectors first
         liked = False
         already_liked = False
 
         like_selectors = [
             'button[aria-label*="like this video"]',
             'button[aria-label*="Like this video"]',
+            'button[aria-label*="like"]',
             '#segmented-like-button button',
             '#segmented-like-button yt-button-shape button',
+            'ytd-segmented-like-dislike-button-renderer button[aria-pressed]',
+            'yt-button-shape button[aria-pressed]',
+            'button.yt-spec-button-shape-next[aria-pressed]',
         ]
 
         for sel in like_selectors:
             try:
-                btn = yt_page.wait_for_selector(sel, timeout=4000)
-                if btn:
+                btn = yt_page.wait_for_selector(sel, timeout=6000)
+                if btn and btn.is_visible():
+                    label = (btn.get_attribute("aria-label") or "").lower()
+                    if "dislike" in label:
+                        continue  # Skip dislike button
                     pressed = btn.get_attribute("aria-pressed")
                     if pressed == "true":
                         log.warning("  [WARN] Video YouTube pe already liked hai!")
@@ -507,12 +522,12 @@ def do_one_like(page, context, seen_videos: set) -> str:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
                         btn.click()
-                        time.sleep(1.5)  # Wait for aria-pressed to update async
+                        time.sleep(1.5)
                         pressed_after = btn.get_attribute("aria-pressed")
                         if pressed_after == "true":
-                            log.info(f"  [OK] YouTube liked! ✓")
+                            log.info(f"  [OK] YouTube liked! ✓ (sel: {sel})")
                         else:
-                            log.info(f"  [OK] YouTube like clicked (aria-pressed async)")
+                            log.info(f"  [OK] YouTube like clicked via selector")
                         liked = True
                     break
             except Exception:
