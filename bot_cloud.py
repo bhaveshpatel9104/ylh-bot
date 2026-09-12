@@ -247,15 +247,23 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
+            headless=False,  # Non-headless = YouTube cannot detect automation!
             args=["--disable-blink-features=AutomationControlled",
                   "--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"]
+                  "--disable-dev-shm-usage", "--disable-gpu",
+                  "--window-size=1280,800"]
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
+        # Stealth: hide automation fingerprints
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            window.chrome = {runtime: {}};
+        """)
         google_login(context, cookies_json)
         human_delay(2, 3)
 
@@ -632,19 +640,27 @@ def run_account(account: dict) -> str:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
+            headless=False,  # Non-headless = YouTube cannot detect automation!
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--window-size=1280,800",
             ]
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
+        # Stealth: hide automation fingerprints
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            window.chrome = {runtime: {}};
+        """)
 
         google_login(context, cookies_json)
         human_delay(2, 3)
