@@ -597,21 +597,31 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                     if "dislike" in label:
                         continue  # Skip dislike button
                     if "unlike" in label:
-                        # Already liked! aria-label contains "unlike this video"
+                        # Already liked!
                         log.warning("  [WARN] Video YouTube pe already liked hai! (unlike detected)")
                         already_liked = True
                     else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
-                        # Use JS click - YouTube's React events only fire via JS
+                        # JS click - YouTube's React events fire via JS
                         yt_page.evaluate("(el) => el.click()", btn)
-                        time.sleep(1.5)
-                        # Verify: label should change to "unlike this video"
-                        label_after = (btn.get_attribute("aria-label") or "").lower()
-                        if "unlike" in label_after:
+                        time.sleep(2)  # Wait for async label update
+                        # Re-query DOM (stale ref won't update)
+                        label_after = yt_page.evaluate("""
+                            () => {
+                                const btns = document.querySelectorAll('button');
+                                for (const b of btns) {
+                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
+                                    if (l.includes('unlike this video')) return 'unlike';
+                                    if (l.includes('like this video')) return 'like';
+                                }
+                                return 'unknown';
+                            }
+                        """)
+                        if label_after == 'unlike':
                             log.info(f"  [OK] YouTube liked! ✓ (sel: {sel})")
                         else:
-                            log.info(f"  [OK] YouTube like clicked JS (label: {label_after[:40]})")
+                            log.info(f"  [OK] YouTube like clicked (dom check: {label_after})")
                         liked = True
                     break
             except Exception:
@@ -783,6 +793,7 @@ def run_account(account: dict) -> str:
         last_video  = [None]   # Tracks last liked video_id for NOPT marking
         consecutive_fails = 0
         consecutive_no_vid = 0
+        consecutive_no_pts = 0   # Track consecutive 0-pts to detect exhausted account
         round_num = 1
         daily_likes = 0      # Points earn karne wale likes
         prev_pts = start_pts
@@ -820,16 +831,21 @@ def run_account(account: dict) -> str:
                         browser.close()
                         return 'done'
                 else:
+                    consecutive_no_pts += 1
                     vid = last_video[0]
                     if vid:
                         if vid + "_NOPT" in seen_videos:
-                            # 2nd time 0 pts → permanent skip
                             seen_videos.add(vid + "_PERM")
                             seen_videos.discard(vid + "_NOPT")
                             log.info(f"[PERM] {vid} - 2nd 0-pts, permanent skip added")
                         else:
                             seen_videos.add(vid + "_NOPT")
-                    log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT}")
+                    log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT} | Consec 0-pts: {consecutive_no_pts}")
+                    # Account exhausted check: 8 consecutive 0-pts = move to next account
+                    if consecutive_no_pts >= 8:
+                        log.info(f"[ACC {acc_num}] 8 consecutive 0-pts - account tasks exhausted! Next account...")
+                        browser.close()
+                        return 'exhausted'
                 # Grid view pe wapas jaao
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
@@ -961,9 +977,10 @@ def run():
         if result == 'hour_limit':
             state['cooldown_until'] = datetime.now() + timedelta(minutes=HOUR_COOLDOWN_MINS)
             log.info(f"[COOL] Account {acc['num']} cooldown until {state['cooldown_until'].strftime('%H:%M')}")
-        elif result in ('daily_limit', 'done'):
+        elif result in ('daily_limit', 'done', 'exhausted'):
             state['daily_done'] = True
-            log.info(f"[DAILY] Account {acc['num']} daily done!")
+            reason = 'tasks exhausted' if result == 'exhausted' else 'daily limit'
+            log.info(f"[DAILY] Account {acc['num']} {reason} - moving to next!")
         elif result == 'error':
             log.error(f"[ERROR] Account {acc['num']} login failed - skipping")
             state['daily_done'] = True  # Skip this account
