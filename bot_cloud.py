@@ -149,37 +149,16 @@ def do_one_view(views_page, context, seen_views: set) -> str:
         if "No videos" in content or "come back" in content.lower():
             return 'novid'
 
-        # Find View button - try multiple selectors
+        # Find View button - confirmed selector: a.earn-btn
         view_btn = None
-        for sel in [
-            "a.earn-btn",
-            "a.btn-primary:has-text('View')",
-            "button:has-text('View')",
-            "a:has-text('View')",
-            "input[value='View']",
-            ".view-btn",
-            "#view-btn",
-        ]:
-            try:
-                el = views_page.wait_for_selector(sel, timeout=3000)
-                if el and el.is_visible():
-                    view_btn = el
-                    log.info(f"[VIEW] Found button via: {sel}")
-                    break
-            except Exception:
-                pass
+        try:
+            view_btn = views_page.wait_for_selector("a.earn-btn", timeout=8000)
+        except Exception:
+            pass
         if not view_btn:
-            # Fallback: find any visible link/button with 'View' text
-            try:
-                view_btn = views_page.locator("text=View").first
-                if view_btn and not view_btn.is_visible():
-                    view_btn = None
-            except Exception:
-                pass
-        if not view_btn:
-            log.warning("[VIEW] No earn-btn / View button found - checking page content")
-            page_text = views_page.inner_text("body")[:300]
-            log.warning(f"[VIEW] Page snippet: {page_text[:200]}")
+            log.warning("[VIEW] No earn-btn found")
+            page_text = views_page.inner_text("body")[:200]
+            log.warning(f"[VIEW] Page snippet: {page_text}")
             return 'novid'
 
         # Click View → YouTube opens in new tab
@@ -202,32 +181,21 @@ def do_one_view(views_page, context, seen_views: set) -> str:
             yt_id = match.group(1)
         log.info(f"[VIEW] Video: {yt_url[:60]} | ID: {yt_id}")
 
-        # Read required watch time from timer: "Watching X / Y s"
+        # Wait 3s for timer to appear on YLH page after click
+        time.sleep(3)
+
+        # Read required watch time from body text: "Watching X / Y s"
         watch_seconds = 180  # default
         try:
-            human_delay(2, 3)  # Wait for timer to appear
-            # Try multiple timer selectors
-            for sel in ["#timer", ".timer", "[id*='timer']", "[class*='timer']"]:
-                try:
-                    el = views_page.query_selector(sel)
-                    if el:
-                        text = el.text_content() or ""
-                        m = re.search(r'/\s*(\d+)\s*s', text)
-                        if m:
-                            watch_seconds = int(m.group(1))
-                            log.info(f"[VIEW] Timer (selector): {watch_seconds}s")
-                            break
-                except Exception:
-                    pass
-            # Fallback: search full page text
-            if watch_seconds == 180:
-                page_text = views_page.inner_text("body") or ""
-                m = re.search(r'Watching\s+\d+\s*/\s*(\d+)\s*s', page_text)
-                if m:
-                    watch_seconds = int(m.group(1))
-                    log.info(f"[VIEW] Timer (text): {watch_seconds}s")
+            page_text = views_page.inner_text("body") or ""
+            m = re.search(r'Watching\s+\d+\s*/\s*(\d+)\s*s', page_text)
+            if m:
+                watch_seconds = int(m.group(1))
+                log.info(f"[VIEW] Timer: {watch_seconds}s")
+            else:
+                log.warning(f"[VIEW] Timer not found in page - using default {watch_seconds}s")
         except Exception as e:
-            log.warning(f"[VIEW] Timer read error: {e} - using default {watch_seconds}s")
+            log.warning(f"[VIEW] Timer read error: {e} - using {watch_seconds}s")
 
         # Wait for timer + 10s buffer
         wait_time = watch_seconds + 10
@@ -314,12 +282,9 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
                 view_count += 1
                 fail_count = 0
                 log.info(f"[VIEWS] Acc {acc_num}: {view_count} views done")
-                # Reload for next video
-                try:
-                    views_page.reload(wait_until="domcontentloaded", timeout=15000)
-                    human_delay(2, 3)
-                except Exception:
-                    pass
+                # YLH auto-refreshes to next video after points credited
+                # Just wait a few seconds for next card to load
+                human_delay(3, 5)
 
             elif result in ('view_hour_limit', 'view_daily_limit'):
                 log.info(f"[VIEWS] Acc {acc_num}: {result} - stopping views")
