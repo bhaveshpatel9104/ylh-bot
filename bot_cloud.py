@@ -149,14 +149,37 @@ def do_one_view(views_page, context, seen_views: set) -> str:
         if "No videos" in content or "come back" in content.lower():
             return 'novid'
 
-        # Find View button (a.earn-btn)
+        # Find View button - try multiple selectors
         view_btn = None
-        try:
-            view_btn = views_page.wait_for_selector("a.earn-btn", timeout=8000)
-        except Exception:
-            pass
+        for sel in [
+            "a.earn-btn",
+            "a.btn-primary:has-text('View')",
+            "button:has-text('View')",
+            "a:has-text('View')",
+            "input[value='View']",
+            ".view-btn",
+            "#view-btn",
+        ]:
+            try:
+                el = views_page.wait_for_selector(sel, timeout=3000)
+                if el and el.is_visible():
+                    view_btn = el
+                    log.info(f"[VIEW] Found button via: {sel}")
+                    break
+            except Exception:
+                pass
         if not view_btn:
-            log.warning("[VIEW] No earn-btn found")
+            # Fallback: find any visible link/button with 'View' text
+            try:
+                view_btn = views_page.locator("text=View").first
+                if view_btn and not view_btn.is_visible():
+                    view_btn = None
+            except Exception:
+                pass
+        if not view_btn:
+            log.warning("[VIEW] No earn-btn / View button found - checking page content")
+            page_text = views_page.inner_text("body")[:300]
+            log.warning(f"[VIEW] Page snippet: {page_text[:200]}")
             return 'novid'
 
         # Click View → YouTube opens in new tab
@@ -269,6 +292,14 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
         human_delay(2, 3)
 
         views_page = context.new_page()
+        # YLH login required!
+        acc_password = account["password"]
+        if not ylh_login(views_page, acc_email, acc_password):
+            log.error(f"[VIEWS] YLH login failed for Account {acc_num}")
+            browser.close()
+            return
+        human_delay(1, 2)
+
         try:
             views_page.goto(YLH_YOUTUBE_VIEWS_URL, wait_until="domcontentloaded", timeout=20000)
             human_delay(2, 3)
