@@ -411,13 +411,32 @@ def yt_watch_before_like(yt_page, seconds=None):
 
 def yt_click_like(yt_page) -> bool:
     """
-    Find visible like button by checking ALL matching elements for non-zero bounding box.
-    .first is wrong - YouTube has multiple like buttons (hidden + visible).
-    Uses trusted Playwright mouse.click() for isTrusted=true events.
+    PRIMARY: YouTube internal API like (SAPISIDHASH + fetch) — bypasses button detection.
+    FALLBACK: Trusted Playwright mouse.click() on visible like button.
     """
+    # ---- METHOD 1: YouTube Internal API (most reliable) ----
+    try:
+        video_id = yt_page.evaluate(
+            "() => new URLSearchParams(location.search).get('v') || location.pathname.split('/shorts/')[1]?.split('?')[0] || ''"
+        )
+        if video_id:
+            log.info(f"  [API] Trying YouTube API like for {video_id}...")
+            if yt_api_like(yt_page, video_id):
+                time.sleep(2)
+                state = yt_like_state(yt_page)
+                if state == "liked":
+                    log.info("  [OK] API like confirmed in DOM!")
+                    return True
+                log.info(f"  [API] Sent OK but DOM state: {state} (may update async)")
+                return True  # Trust API 200 response even if DOM lags
+    except Exception as e:
+        log.warning(f"  [API] Error: {e}")
+
+    # ---- METHOD 2: Trusted mouse click (fallback) ----
+    log.info("  [FALLBACK] Trying trusted mouse click...")
     loc = None
 
-    # Scroll to where like button appears (200px from top works)
+    # Scroll to where like button appears
     try:
         yt_page.evaluate("window.scrollTo(0, 220)")
         time.sleep(0.8)
@@ -426,16 +445,15 @@ def yt_click_like(yt_page) -> bool:
 
     for sel in LIKE_BUTTON_SELECTORS:
         try:
-            # Get ALL matching elements - pick the VISIBLE one (non-zero bounding box)
             all_locs = yt_page.locator(sel).all()
             for candidate in all_locs:
                 try:
                     box = candidate.bounding_box()
                     if not box or box.get("width", 0) == 0 or box.get("height", 0) == 0:
-                        continue  # Skip hidden/zero-dimension buttons
+                        continue
                     label = (candidate.get_attribute("aria-label") or "").lower()
                     if "dislike" in label:
-                        continue  # Skip dislike button
+                        continue
                     if "unlike" in label:
                         log.info("  [OK] YouTube already liked (unlike in label)")
                         return True
@@ -501,7 +519,75 @@ def yt_click_like(yt_page) -> bool:
     return state == "liked"
 
 
-def do_one_view(views_page, context, seen_views: set) -> str:
+def yt_api_like(yt_page, video_id: str) -> bool:
+    """
+    Like via YouTube's internal API (/youtubei/v1/like/like).
+    Uses page's own cookies + SAPISIDHASH — indistinguishable from real browser.
+    Returns True if like registered.
+    """
+    try:
+        result = yt_page.evaluate("""
+            async (videoId) => {
+                try {
+                    // Step 1: Get SAPISID cookie for hash
+                    let sapisid = '';
+                    document.cookie.split(';').forEach(c => {
+                        c = c.trim();
+                        if (c.startsWith('__Secure-3PAPISID=')) sapisid = c.split('=').slice(1).join('=');
+                        else if (!sapisid && c.startsWith('SAPISID=')) sapisid = c.split('=').slice(1).join('=');
+                    });
+                    if (!sapisid) return {ok: false, error: 'no sapisid cookie'};
+
+                    // Step 2: Generate SAPISIDHASH
+                    const ts = Math.floor(Date.now() / 1000);
+                    const msgBuf = new TextEncoder().encode(ts + ' ' + sapisid + ' https://www.youtube.com');
+                    const hashBuf = await crypto.subtle.digest('SHA-1', msgBuf);
+                    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2,'0')).join('');
+
+                    // Step 3: Get YouTube innertube config
+                    const cv  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('INNERTUBE_CLIENT_VERSION') || '2.20231101.01.00' : '2.20231101.01.00';
+                    const key = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('INNERTUBE_API_KEY') || '' : '';
+                    const hl  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('HL') || 'en' : 'en';
+                    const gl  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('GL') || 'US' : 'US';
+
+                    // Step 4: Call like API
+                    const url = '/youtubei/v1/like/like' + (key ? '?key=' + key : '');
+                    const resp = await fetch(url, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'SAPISIDHASH ' + ts + '_' + hashHex,
+                            'X-Goog-AuthUser': '0',
+                            'X-Origin': 'https://www.youtube.com',
+                            'X-Youtube-Client-Name': '1',
+                            'X-Youtube-Client-Version': cv,
+                        },
+                        body: JSON.stringify({
+                            videoId: videoId,
+                            context: {
+                                client: {clientName: 'WEB', clientVersion: cv, hl: hl, gl: gl}
+                            }
+                        })
+                    });
+                    return {ok: resp.ok, status: resp.status};
+                } catch(e) {
+                    return {ok: false, error: String(e)};
+                }
+            }
+        """, video_id)
+
+        if result and result.get('ok'):
+            log.info(f"  [OK] YouTube API like sent! status={result.get('status')}")
+            return True
+        else:
+            log.warning(f"  [WARN] YouTube API like failed: {result}")
+            return False
+    except Exception as e:
+        log.warning(f"  [WARN] yt_api_like error: {e}")
+        return False
+
+
     """
     Returns:
       'ok'             - view successful, points earned
