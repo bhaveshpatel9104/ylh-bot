@@ -476,55 +476,78 @@ def do_one_like(page, context, seen_videos: set) -> str:
         except Exception:
             pass
 
-        # YouTube Like - check if already liked
+        # YouTube Like - proper Playwright click (human-like, not JS)
         liked = False
         already_liked = False
 
-        for sel in [
+        # More selectors to try
+        like_selectors = [
             'button[aria-label*="like this video"]',
             'button[aria-label*="Like this video"]',
             '#segmented-like-button button',
             '#segmented-like-button yt-button-shape button',
-        ]:
+            'ytd-toggle-button-renderer:has(#text:text("Like")) button',
+            'yt-button-shape button[aria-label*="ike"]',
+        ]
+
+        for sel in like_selectors:
             try:
                 btn = yt_page.wait_for_selector(sel, timeout=4000)
                 if btn:
                     pressed = btn.get_attribute("aria-pressed")
                     if pressed == "true":
-                        log.warning("  [WARN] Video YouTube pe already liked hai - skipping!")
+                        log.warning("  [WARN] Video YouTube pe already liked hai!")
                         already_liked = True
                     else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
-                        btn.click()
-                        log.info("  [OK] YouTube liked! (fresh)")
-                        liked = True
+                        # Proper Playwright click = real mouse events (mousedown+mouseup+click)
+                        btn.click(force=False)
+                        human_delay(0.5, 1)
+                        # Verify like actually stuck
+                        pressed_after = btn.get_attribute("aria-pressed")
+                        if pressed_after == "true":
+                            log.info(f"  [OK] YouTube liked! ✓ (selector: {sel})")
+                            liked = True
+                        else:
+                            log.warning(f"  [WARN] Like click nahi hua (aria-pressed still false) - selector: {sel}")
                     break
             except Exception:
                 continue
 
+        # JS fallback - only if ALL selectors failed to find button
         if not liked and not already_liked:
             try:
+                # Find label of like button for logging
                 js_result = yt_page.evaluate("""
                     () => {
                         const btns = document.querySelectorAll('button');
                         for (const b of btns) {
                             const label = (b.getAttribute('aria-label') || '').toLowerCase();
                             if (label.includes('like') && !label.includes('dislike')) {
-                                const wasLiked = b.getAttribute('aria-pressed') === 'true';
-                                if (!wasLiked) b.click();
-                                return wasLiked ? 'already_liked: ' + label : 'ok: ' + label;
+                                return b.getAttribute('aria-pressed') === 'true'
+                                    ? 'already_liked: ' + label
+                                    : 'found: ' + label;
                             }
                         }
                         return 'not_found';
                     }
                 """)
                 if js_result.startswith('already_liked:'):
-                    log.warning(f"  [WARN] Already liked (JS): {js_result}")
+                    log.warning(f"  [WARN] Already liked (JS check): {js_result}")
                     already_liked = True
-                elif js_result.startswith('ok:'):
-                    log.info(f"  [OK] YouTube like JS: {js_result}")
-                    liked = True
+                elif js_result.startswith('found:'):
+                    # Found button via JS - use Playwright to click it properly
+                    log.info(f"  [INFO] Button found via JS, Playwright se click kar raha hoon...")
+                    try:
+                        yt_page.click('button[aria-label*="ike"]', timeout=3000)
+                        human_delay(0.5, 1)
+                        log.info(f"  [OK] YouTube like JS-found+Playwright-click: {js_result}")
+                        liked = True
+                    except Exception:
+                        log.warning(f"  [WARN] Playwright click bhi failed on JS-found button")
+                else:
+                    log.warning(f"  [WARN] Like button nahi mila: {js_result}")
             except Exception:
                 pass
 
