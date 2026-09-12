@@ -393,21 +393,63 @@ def do_one_like(page, context, seen_videos: set) -> str:
 
         log.info(f"  >> YouTube: {yt_url[:70]} | ID: {yt_video_id}")
 
-        # DUPLICATE CHECK
+        # DUPLICATE CHECK - verify on YouTube first (don't blindly skip!)
         if yt_video_id and yt_video_id in seen_videos:
-            log.warning(f"  [SKIP] Video {yt_video_id} already liked - skipping!")
-            yt_page.close()
-            page.bring_to_front()
+            log.warning(f"  [DUP] Video {yt_video_id} seen before - YouTube pe verify kar raha hoon...")
+            # Check if video is ACTUALLY liked on YouTube
+            actually_liked = False
             try:
-                skip_link = page.wait_for_selector("text=Skip", timeout=3000)
-                if skip_link:
-                    skip_link.click()
-                    log.info("  [SKIP] YLH Skip link clicked!")
+                yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                for sel in [
+                    'button[aria-label*="like this video"]',
+                    'button[aria-label*="Like this video"]',
+                    '#segmented-like-button button',
+                ]:
+                    try:
+                        btn = yt_page.wait_for_selector(sel, timeout=3000)
+                        if btn:
+                            actually_liked = (btn.get_attribute("aria-pressed") == "true")
+                            break
+                    except Exception:
+                        continue
+                if not actually_liked:
+                    # JS fallback check
+                    result = yt_page.evaluate("""
+                        () => {
+                            const btns = document.querySelectorAll('button');
+                            for (const b of btns) {
+                                const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                                if (label.includes('like') && !label.includes('dislike')) {
+                                    return b.getAttribute('aria-pressed') === 'true';
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+                    actually_liked = bool(result)
+            except Exception as e:
+                log.warning(f"  [DUP] YouTube check error: {e} - skipping to be safe")
+                actually_liked = True  # safe fallback
+
+            if actually_liked:
+                log.info(f"  [DUP] {yt_video_id} YouTube pe liked hai - YLH Skip")
+                yt_page.close()
+                page.bring_to_front()
+                try:
+                    skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                    if skip_link:
+                        skip_link.click()
+                        log.info("  [SKIP] YLH Skip link clicked!")
+                        human_delay(2, 3)
+                except Exception:
+                    page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
                     human_delay(2, 3)
-            except Exception:
-                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
-                human_delay(2, 3)
-            return 'skip'
+                return 'skip'
+            else:
+                log.info(f"  [DUP] {yt_video_id} YouTube pe liked NAHI! Like karke points earn karte hain!")
+                seen_videos.discard(yt_video_id)  # Allow re-tracking
+                # Continue to like logic below (don't return here)
+
 
         # YouTube scroll
         try:
