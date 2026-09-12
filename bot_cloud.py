@@ -51,6 +51,7 @@ ACCOUNTS = [
 
 YLH_LOGIN_URL         = "https://www.youlikehits.com/login.php"
 YLH_YOUTUBE_LIKES_URL = "https://www.youlikehits.com/youtubelikes.php"
+YLH_YOUTUBE_VIEWS_URL = "https://www.youlikehits.com/youtubenew2.php"
 
 # Logging
 logging.basicConfig(
@@ -122,7 +123,197 @@ def get_points(page):
 DAILY_LIMIT = 120  # YLH daily like limit
 
 
-def do_one_like(page, context, seen_videos: set) -> str:
+def do_one_view(views_page, context, seen_views: set) -> str:
+    """
+    Returns:
+      'ok'             - view successful, points earned
+      'skip'           - already viewed
+      'fail'           - error
+      'novid'          - no videos available
+      'view_hour_limit'  - hourly view limit reached
+      'view_daily_limit' - daily view limit reached
+    """
+    import re
+    try:
+        content = views_page.content()
+
+        # Limit detection for views
+        if "view limit" in content.lower() or "viewing limit" in content.lower():
+            if "hourly" in content.lower() or "per hour" in content.lower():
+                log.warning("[VIEW_LIMIT] Hourly view limit reached!")
+                return 'view_hour_limit'
+            else:
+                log.warning("[VIEW_LIMIT] Daily view limit reached!")
+                return 'view_daily_limit'
+
+        if "No videos" in content or "come back" in content.lower():
+            return 'novid'
+
+        # Find View button (a.earn-btn)
+        view_btn = None
+        try:
+            view_btn = views_page.wait_for_selector("a.earn-btn", timeout=8000)
+        except Exception:
+            pass
+        if not view_btn:
+            log.warning("[VIEW] No earn-btn found")
+            return 'novid'
+
+        # Click View → YouTube opens in new tab
+        try:
+            with context.expect_page(timeout=8000) as new_page_info:
+                view_btn.click()
+            yt_page = new_page_info.value
+            yt_page.wait_for_load_state("domcontentloaded", timeout=15000)
+            yt_url = yt_page.url
+        except Exception as e:
+            log.warning(f"[VIEW] New tab error: {e}")
+            # Maybe no new tab - just wait
+            yt_page = None
+            yt_url = ""
+
+        # Extract YouTube video ID
+        yt_id = ""
+        match = re.search(r'v=([a-zA-Z0-9_-]+)', yt_url)
+        if match:
+            yt_id = match.group(1)
+        log.info(f"[VIEW] Video: {yt_url[:60]} | ID: {yt_id}")
+
+        # Read required watch time from timer: "Watching X / Y s"
+        watch_seconds = 180  # default
+        try:
+            human_delay(2, 3)  # Wait for timer to appear
+            # Try multiple timer selectors
+            for sel in ["#timer", ".timer", "[id*='timer']", "[class*='timer']"]:
+                try:
+                    el = views_page.query_selector(sel)
+                    if el:
+                        text = el.text_content() or ""
+                        m = re.search(r'/\s*(\d+)\s*s', text)
+                        if m:
+                            watch_seconds = int(m.group(1))
+                            log.info(f"[VIEW] Timer (selector): {watch_seconds}s")
+                            break
+                except Exception:
+                    pass
+            # Fallback: search full page text
+            if watch_seconds == 180:
+                page_text = views_page.inner_text("body") or ""
+                m = re.search(r'Watching\s+\d+\s*/\s*(\d+)\s*s', page_text)
+                if m:
+                    watch_seconds = int(m.group(1))
+                    log.info(f"[VIEW] Timer (text): {watch_seconds}s")
+        except Exception as e:
+            log.warning(f"[VIEW] Timer read error: {e} - using default {watch_seconds}s")
+
+        # Wait for timer + 10s buffer
+        wait_time = watch_seconds + 10
+        log.info(f"[VIEW] Waiting {wait_time}s (timer={watch_seconds}s)...")
+        time.sleep(wait_time)
+
+        # Close YouTube tab
+        if yt_page:
+            try:
+                yt_page.close()
+            except Exception:
+                pass
+
+        # Check for "Points Added!" on YLH page
+        try:
+            content = views_page.content()
+            if "Points Added" in content:
+                m = re.search(r'(\d+)\s*Points Added', content)
+                pts = m.group(1) if m else "?"
+                log.info(f"[VIEW] ✓ +{pts} pts earned! Video: {yt_id}")
+            else:
+                log.info(f"[VIEW] Done (no pts confirm). Video: {yt_id}")
+        except Exception:
+            pass
+
+        if yt_id:
+            seen_views.add(yt_id)
+        return 'ok'
+
+    except Exception as e:
+        log.error(f"[ERROR] do_one_view: {e}")
+        return 'fail'
+
+
+def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
+    """Run views for an account for up to duration_seconds."""
+    acc_num   = account["num"]
+    acc_email = account["email"]
+    cookies_json = os.environ.get(account["cookies_env"], "")
+
+    if not cookies_json:
+        return
+
+    log.info(f"[VIEWS] Account {acc_num} ({acc_email}) - {duration_seconds//60} min session")
+    deadline = time.time() + duration_seconds
+    seen_views = set()
+    view_count = 0
+    fail_count = 0
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled",
+                  "--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage", "--disable-gpu"]
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        google_login(context, cookies_json)
+        human_delay(2, 3)
+
+        views_page = context.new_page()
+        try:
+            views_page.goto(YLH_YOUTUBE_VIEWS_URL, wait_until="domcontentloaded", timeout=20000)
+            human_delay(2, 3)
+        except Exception:
+            browser.close()
+            return
+
+        while time.time() < deadline:
+            result = do_one_view(views_page, context, seen_views)
+
+            if result == 'ok':
+                view_count += 1
+                fail_count = 0
+                log.info(f"[VIEWS] Acc {acc_num}: {view_count} views done")
+                # Reload for next video
+                try:
+                    views_page.reload(wait_until="domcontentloaded", timeout=15000)
+                    human_delay(2, 3)
+                except Exception:
+                    pass
+
+            elif result in ('view_hour_limit', 'view_daily_limit'):
+                log.info(f"[VIEWS] Acc {acc_num}: {result} - stopping views")
+                break
+
+            elif result == 'novid':
+                log.info(f"[VIEWS] Acc {acc_num}: No videos - 2 min wait")
+                time.sleep(120)
+                try:
+                    views_page.goto(YLH_YOUTUBE_VIEWS_URL, wait_until="domcontentloaded", timeout=20000)
+                    human_delay(2, 3)
+                except Exception:
+                    pass
+
+            elif result == 'fail':
+                fail_count += 1
+                if fail_count >= 3:
+                    log.warning(f"[VIEWS] Acc {acc_num}: 3 fails - stopping")
+                    break
+                time.sleep(30)
+
+        browser.close()
+    log.info(f"[VIEWS] Acc {acc_num} session done: {view_count} total views")
+
+
     """
     Returns:
       'ok'    - like successful (points earned)
@@ -545,14 +736,22 @@ def run():
                 log.info("=" * 50)
                 break
 
-            # Wait for earliest cooldown
+            # Instead of sleeping, run VIEWS for all accounts!
             cooldowns = [s['cooldown_until'] for s in future if s['cooldown_until']]
             if cooldowns:
                 next_wake = min(cooldowns)
-                wait_secs = max((next_wake - now).total_seconds(), 0) + 60
-                log.info(f"[WAIT] Sabhi accounts hourly limit pe hain.")
-                log.info(f"[WAIT] Next wakeup: {next_wake.strftime('%H:%M:%S')} ({int(wait_secs/60)} min wait)")
-                time.sleep(wait_secs)
+                wait_secs = max((next_wake - now).total_seconds(), 0)
+                log.info(f"[VIEWS] All likes on cooldown - switching to Views!")
+                log.info(f"[VIEWS] Running views for {int(wait_secs/60)} min until {next_wake.strftime('%H:%M')}")
+
+                # Run views for each account during cooldown
+                view_duration = max(int(wait_secs) - 60, 60)  # 60s buffer
+                for s in future:
+                    acc_view = s['account']
+                    log.info(f"[VIEWS] Starting Account {acc_view['num']} views ({view_duration//60} min)...")
+                    run_views_session(acc_view, duration_seconds=view_duration)
+                    if time.time() >= next_wake.timestamp():
+                        break  # Time to go back to likes
             else:
                 time.sleep(120)
             continue
