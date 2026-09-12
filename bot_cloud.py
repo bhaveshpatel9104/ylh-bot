@@ -508,8 +508,8 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                                 const btns = document.querySelectorAll('button');
                                 for (const b of btns) {
                                     const l = (b.getAttribute('aria-label')||'').toLowerCase();
-                                    if (l.includes('like') && !l.includes('dislike'))
-                                        return b.getAttribute('aria-pressed') === 'true';
+                                    // YouTube liked state = "unlike this video" in label
+                                    if (l.includes('unlike this video')) return true;
                                 }
                                 return false;
                             }
@@ -560,12 +560,10 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
         like_selectors = [
             'button[aria-label*="like this video"]',
             'button[aria-label*="Like this video"]',
-            'button[aria-label*="like"]',
             '#segmented-like-button button',
             '#segmented-like-button yt-button-shape button',
-            'ytd-segmented-like-dislike-button-renderer button[aria-pressed]',
-            'yt-button-shape button[aria-pressed]',
-            'button.yt-spec-button-shape-next[aria-pressed]',
+            'ytd-segmented-like-dislike-button-renderer button',
+            'yt-button-shape button',
         ]
 
         for sel in like_selectors:
@@ -575,20 +573,21 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                     label = (btn.get_attribute("aria-label") or "").lower()
                     if "dislike" in label:
                         continue  # Skip dislike button
-                    pressed = btn.get_attribute("aria-pressed")
-                    if pressed == "true":
-                        log.warning("  [WARN] Video YouTube pe already liked hai!")
+                    if "unlike" in label:
+                        # Already liked! aria-label contains "unlike this video"
+                        log.warning("  [WARN] Video YouTube pe already liked hai! (unlike detected)")
                         already_liked = True
                     else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
                         btn.click()
                         time.sleep(1.5)
-                        pressed_after = btn.get_attribute("aria-pressed")
-                        if pressed_after == "true":
+                        # Check if label changed to "unlike" = like succeeded
+                        label_after = (btn.get_attribute("aria-label") or "").lower()
+                        if "unlike" in label_after:
                             log.info(f"  [OK] YouTube liked! ✓ (sel: {sel})")
                         else:
-                            log.info(f"  [OK] YouTube like clicked via selector")
+                            log.info(f"  [OK] YouTube like clicked (label: {label_after[:40]})")
                         liked = True
                     break
             except Exception:
@@ -602,10 +601,12 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                         const btns = document.querySelectorAll('button');
                         for (const b of btns) {
                             const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                            if (label.includes('like') && !label.includes('dislike')) {
-                                const wasLiked = b.getAttribute('aria-pressed') === 'true';
-                                if (!wasLiked) b.click();
-                                return wasLiked ? 'already_liked: ' + label : 'ok: ' + label;
+                            if (label.includes('unlike this video')) {
+                                return 'already_liked: ' + label;
+                            }
+                            if (label.includes('like this video')) {
+                                b.click();
+                                return 'ok: ' + label;
                             }
                         }
                         return 'not_found';
