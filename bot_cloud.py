@@ -418,9 +418,22 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
 
         # DUPLICATE CHECK - verify on YouTube first (don't blindly skip!)
         if yt_video_id and yt_video_id in seen_videos:
-            # NOPT marker: already done + 0 pts task — verify liked then skip
+            perm_key  = yt_video_id + "_PERM"
             nopt_key  = yt_video_id + "_NOPT"
             final_key = yt_video_id + "_FINAL"
+
+            # PERM = permanently skip (no need to open YouTube)
+            if perm_key in seen_videos:
+                log.warning(f"  [PERM_SKIP] {yt_video_id} - permanently skip")
+                yt_page.close()
+                page.bring_to_front()
+                try:
+                    sl = page.wait_for_selector("text=Skip", timeout=3000)
+                    if sl: sl.click(); human_delay(1, 2)
+                except Exception:
+                    page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                    human_delay(2, 3)
+                return 'skip'
 
             if nopt_key in seen_videos or final_key in seen_videos:
                 # Verify quickly: is it actually liked on YouTube?
@@ -474,10 +487,20 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                         human_delay(2, 3)
                     return 'skip'
                 else:
-                    log.warning(f"  [!] {yt_video_id} NOT liked even after attempts - trying once more")
+                    # Verify failed - permanently skip to break infinite loop!
+                    log.warning(f"  [PERM] {yt_video_id} verify failed - PERMANENT SKIP")
+                    seen_videos.add(yt_video_id + "_PERM")
                     seen_videos.discard(nopt_key)
                     seen_videos.discard(final_key)
-                    # Continue to like logic below
+                    try:
+                        skip_link = page.wait_for_selector("text=Skip", timeout=3000)
+                        if skip_link:
+                            skip_link.click()
+                            human_delay(2, 3)
+                    except Exception:
+                        page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                        human_delay(2, 3)
+                    return 'skip'
 
             else:
                 # First DUP: verify then try once more
@@ -558,12 +581,12 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
         already_liked = False
 
         like_selectors = [
-            'button[aria-label*="like this video"]',
+            'like-button-view-model button',                                    # Most direct ✓
+            'button[aria-label*="like this video"]',                            # Exact label ✓
             'button[aria-label*="Like this video"]',
+            'segmented-like-dislike-button-view-model button[aria-label*="like this video"]',
             '#segmented-like-button button',
-            '#segmented-like-button yt-button-shape button',
             'ytd-segmented-like-dislike-button-renderer button',
-            'yt-button-shape button',
         ]
 
         for sel in like_selectors:
@@ -798,7 +821,13 @@ def run_account(account: dict) -> str:
                 else:
                     vid = last_video[0]
                     if vid:
-                        seen_videos.add(vid + "_NOPT")  # Mark: 0-pts task, skip next time
+                        if vid + "_NOPT" in seen_videos:
+                            # 2nd time 0 pts → permanent skip
+                            seen_videos.add(vid + "_PERM")
+                            seen_videos.discard(vid + "_NOPT")
+                            log.info(f"[PERM] {vid} - 2nd 0-pts, permanent skip added")
+                        else:
+                            seen_videos.add(vid + "_NOPT")
                     log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT}")
                 # Grid view pe wapas jaao
                 try:
