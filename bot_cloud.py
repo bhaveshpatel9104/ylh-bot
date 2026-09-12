@@ -521,56 +521,81 @@ def yt_click_like(yt_page) -> bool:
 
 def yt_api_like(yt_page, video_id: str) -> bool:
     """
-    Like via YouTube's internal API (/youtubei/v1/like/like).
-    Uses page's own cookies + SAPISIDHASH — indistinguishable from real browser.
-    Returns True if like registered.
+    Like via YouTube internal API (/youtubei/v1/like/like).
+    FIX: Uses target.videoId (not videoId at root) + proper context.
     """
     try:
         result = yt_page.evaluate("""
             async (videoId) => {
                 try {
-                    // Step 1: Get SAPISID cookie for hash
+                    // Get SAPISID cookie (not httpOnly, accessible in JS)
                     let sapisid = '';
                     document.cookie.split(';').forEach(c => {
                         c = c.trim();
                         if (c.startsWith('__Secure-3PAPISID=')) sapisid = c.split('=').slice(1).join('=');
                         else if (!sapisid && c.startsWith('SAPISID=')) sapisid = c.split('=').slice(1).join('=');
                     });
-                    if (!sapisid) return {ok: false, error: 'no sapisid cookie'};
+                    if (!sapisid) return {ok: false, error: 'no_sapisid'};
 
-                    // Step 2: Generate SAPISIDHASH
+                    // SAPISIDHASH
                     const ts = Math.floor(Date.now() / 1000);
                     const msgBuf = new TextEncoder().encode(ts + ' ' + sapisid + ' https://www.youtube.com');
                     const hashBuf = await crypto.subtle.digest('SHA-1', msgBuf);
                     const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2,'0')).join('');
 
-                    // Step 3: Get YouTube innertube config
-                    const cv  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('INNERTUBE_CLIENT_VERSION') || '2.20231101.01.00' : '2.20231101.01.00';
-                    const key = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('INNERTUBE_API_KEY') || '' : '';
-                    const hl  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('HL') || 'en' : 'en';
-                    const gl  = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('GL') || 'US' : 'US';
+                    // YouTube innertube config
+                    const ytc = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg : null;
+                    const cv  = ytc ? (ytc.get('INNERTUBE_CLIENT_VERSION') || '2.20240101.00.00') : '2.20240101.00.00';
+                    const key = ytc ? (ytc.get('INNERTUBE_API_KEY') || '') : '';
+                    const hl  = ytc ? (ytc.get('HL') || 'en') : 'en';
+                    const gl  = ytc ? (ytc.get('GL') || 'US') : 'US';
+                    const vd  = ytc ? (ytc.get('VISITOR_DATA') || '') : '';
 
-                    // Step 4: Call like API
-                    const url = '/youtubei/v1/like/like' + (key ? '?key=' + key : '');
-                    const resp = await fetch(url, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': 'SAPISIDHASH ' + ts + '_' + hashHex,
-                            'X-Goog-AuthUser': '0',
-                            'X-Origin': 'https://www.youtube.com',
-                            'X-Youtube-Client-Name': '1',
-                            'X-Youtube-Client-Version': cv,
+                    // CORRECT body format: target.videoId
+                    const body = {
+                        context: {
+                            client: {
+                                clientName: 'WEB',
+                                clientVersion: cv,
+                                hl: hl, gl: gl,
+                                userAgent: navigator.userAgent,
+                                originalUrl: location.href,
+                                platform: 'DESKTOP',
+                                clientFormFactor: 'UNKNOWN_FORM_FACTOR',
+                                ...(vd ? {visitorData: vd} : {})
+                            },
+                            user: {lockedSafetyMode: false},
+                            request: {useSsl: true}
                         },
-                        body: JSON.stringify({
-                            videoId: videoId,
-                            context: {
-                                client: {clientName: 'WEB', clientVersion: cv, hl: hl, gl: gl}
-                            }
-                        })
-                    });
-                    return {ok: resp.ok, status: resp.status};
+                        target: {videoId: videoId}
+                    };
+
+                    const hdrs = {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'SAPISIDHASH ' + ts + '_' + hashHex,
+                        'X-Goog-AuthUser': '0',
+                        'X-Origin': 'https://www.youtube.com',
+                        'X-Youtube-Client-Name': '1',
+                        'X-Youtube-Client-Version': cv,
+                    };
+
+                    // Try with key, then without
+                    const urls = key
+                        ? ['/youtubei/v1/like/like?key=' + key, '/youtubei/v1/like/like']
+                        : ['/youtubei/v1/like/like'];
+
+                    for (const url of urls) {
+                        const resp = await fetch(url, {
+                            method: 'POST', credentials: 'include',
+                            headers: hdrs, body: JSON.stringify(body)
+                        });
+                        // 200/204 = success, 403 = already liked (also success)
+                        if (resp.ok || resp.status === 204 || resp.status === 403) {
+                            return {ok: true, status: resp.status};
+                        }
+                        if (resp.status !== 400) break;
+                    }
+                    return {ok: false, status: 400};
                 } catch(e) {
                     return {ok: false, error: String(e)};
                 }
@@ -578,7 +603,7 @@ def yt_api_like(yt_page, video_id: str) -> bool:
         """, video_id)
 
         if result and result.get('ok'):
-            log.info(f"  [OK] YouTube API like sent! status={result.get('status')}")
+            log.info(f"  [OK] YouTube API like! status={result.get('status')}")
             return True
         else:
             log.warning(f"  [WARN] YouTube API like failed: {result}")
