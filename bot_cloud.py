@@ -314,6 +314,7 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
     log.info(f"[VIEWS] Acc {acc_num} session done: {view_count} total views")
 
 
+def do_one_like(page, context, seen_videos: set) -> str:
     """
     Returns:
       'ok'    - like successful (points earned)
