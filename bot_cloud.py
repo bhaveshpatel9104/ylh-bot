@@ -603,14 +603,15 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                     else:
                         btn.scroll_into_view_if_needed()
                         human_delay(0.5, 1)
-                        btn.click()
+                        # Use JS click - YouTube's React events only fire via JS
+                        yt_page.evaluate("(el) => el.click()", btn)
                         time.sleep(1.5)
-                        # Check if label changed to "unlike" = like succeeded
+                        # Verify: label should change to "unlike this video"
                         label_after = (btn.get_attribute("aria-label") or "").lower()
                         if "unlike" in label_after:
                             log.info(f"  [OK] YouTube liked! ✓ (sel: {sel})")
                         else:
-                            log.info(f"  [OK] YouTube like clicked (label: {label_after[:40]})")
+                            log.info(f"  [OK] YouTube like clicked JS (label: {label_after[:40]})")
                         liked = True
                     break
             except Exception:
