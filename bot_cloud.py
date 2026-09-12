@@ -67,14 +67,17 @@ def human_delay(mn=3.0, mx=6.0):
     time.sleep(random.uniform(mn, mx))
 
 
+def cookie_filename(acc: dict) -> str:
+    num = acc["num"]
+    return f"google_cookies{'_'+str(num) if num > 1 else ''}.json"
+
+
 def get_cookies(acc: dict) -> str:
     """Load cookies: env var (GitHub Actions) OR local JSON file (local test)"""
     val = os.environ.get(acc["cookies_env"], "")
     if val:
         return val
-    # Local fallback: read from file
-    num = acc["num"]
-    fname = f"google_cookies{'_'+str(num) if num > 1 else ''}.json"
+    fname = cookie_filename(acc)
     if os.path.exists(fname):
         with open(fname, encoding="utf-8") as f:
             log.info(f"[LOCAL] Cookies from file: {fname}")
@@ -82,21 +85,156 @@ def get_cookies(acc: dict) -> str:
     return ""
 
 
-def google_login(context, cookies_json):
+def prepare_cookies(raw):
+    now = time.time()
+    out = []
+    seen = set()
+    for c in raw:
+        name = c.get("name")
+        domain = c.get("domain")
+        if not name or not domain:
+            continue
+        expires = c.get("expires") if c.get("expires") not in (None,) else c.get("expirationDate")
+        if expires not in (None, -1, 0, -1.0) and float(expires) < now:
+            continue
+        same = c.get("sameSite") or "Lax"
+        if same in ("no_restriction", "unspecified", "None"):
+            same = "None"
+        elif same not in ("Strict", "Lax", "None"):
+            same = "Lax"
+        key = (name, domain, c.get("path") or "/")
+        if key in seen:
+            continue
+        seen.add(key)
+        item = {
+            "name": name,
+            "value": c.get("value", ""),
+            "domain": domain,
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure")) or same == "None",
+            "httpOnly": bool(c.get("httpOnly")),
+            "sameSite": same,
+        }
+        if expires not in (None, -1, 0, -1.0):
+            item["expires"] = float(expires)
+        out.append(item)
+    return out
+
+
+def youtube_is_signed_in(page) -> bool:
+    """Check if YouTube is signed in. Checks multiple selectors for robustness."""
+    try:
+        return bool(
+            page.evaluate(
+                """
+                () => {
+                    // Method 1: ytcfg LOGGED_IN flag
+                    try {
+                        if (window.ytcfg && typeof window.ytcfg.get === 'function' && window.ytcfg.get('LOGGED_IN'))
+                            return true;
+                    } catch (e) {}
+                    // Method 2: Modern avatar element (yt-img-shadow)
+                    if (document.querySelector('yt-img-shadow#avatar')) return true;
+                    // Method 3: Old avatar button
+                    if (document.querySelector('#avatar-btn')) return true;
+                    // Method 4: Account button
+                    if (document.querySelector('button[aria-label*="Account"]')) return true;
+                    // Method 5: Account icon in topbar
+                    if (document.querySelector('yt-avatar-shape, ytd-avatar-shadow')) return true;
+                    // Method 6: Negative check - sign-in button present = NOT logged in
+                    if (document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com"]'))
+                        return false;
+                    // Method 7: No sign-in button visible = likely logged in
+                    const bodyText = (document.body && document.body.innerText || '').toLowerCase();
+                    if (bodyText.includes('sign in to youtube') || bodyText.includes('sign in to like'))
+                        return false;
+                    // If avatar selector not found but no sign-in prompt, try ytInitialData
+                    try {
+                        if (window.ytInitialData && window.ytInitialData.header) return true;
+                    } catch(e) {}
+                    return false;
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def save_context_cookies(context, acc):
+    if not acc or os.environ.get("GITHUB_ACTIONS"):
+        return
+    try:
+        fname = cookie_filename(acc)
+        cookies = context.cookies()
+        with open(fname, "w", encoding="utf-8") as f:
+            json.dump(cookies, f)
+        log.info(f"[OK] Cookies refreshed -> {fname} ({len(cookies)})")
+    except Exception as e:
+        log.warning(f"[WARN] Cookie save failed: {e}")
+
+
+def google_login(context, cookies_json, acc=None) -> bool:
+    """Return True only if YouTube is actually signed in (avatar / ytcfg LOGGED_IN)."""
     if cookies_json:
         try:
-            cookies = json.loads(cookies_json)
+            cookies = prepare_cookies(json.loads(cookies_json))
             context.add_cookies(cookies)
             log.info(f"[OK] Google cookies loaded! ({len(cookies)} cookies)")
-            page = context.new_page()
-            page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
-            time.sleep(3)
-            log.info("[OK] YouTube session active via cookies!")
-            page.close()
-            return
         except Exception as e:
             log.error(f"[ERROR] Cookie load failed: {e}")
-    log.warning("[WARN] No cookies - skipping Google login")
+            cookies_json = ""
+
+    page = context.new_page()
+    try:
+        try:
+            page.goto("https://accounts.google.com", wait_until="domcontentloaded", timeout=20000)
+            time.sleep(2)
+        except Exception:
+            pass
+        # Use networkidle so YouTube JS (ytcfg, avatar) fully initializes
+        try:
+            page.goto("https://www.youtube.com", wait_until="networkidle", timeout=30000)
+        except Exception:
+            try:
+                page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+        time.sleep(5)  # Extra wait for avatar element to render
+        signed_in = youtube_is_signed_in(page)
+        if signed_in:
+            log.info("[OK] YouTube SIGNED IN (session real hai)")
+            page.close()
+            return True
+
+        log.warning("[WARN] YouTube NOT signed in — cookies stale / rejected (Sign in dikh raha hai)")
+        if os.environ.get("GITHUB_ACTIONS"):
+            page.close()
+            return False
+
+        log.warning("[ACTION] Bot wale Chrome window mein YouTube Sign in karo. 3 min wait...")
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if youtube_is_signed_in(page):
+                log.info("[OK] YouTube SIGNED IN (manual login)")
+                save_context_cookies(context, acc)
+                page.close()
+                return True
+            remaining = int(deadline - time.time())
+            if remaining % 15 == 0:
+                log.info(f"  ... waiting for YouTube login ({remaining}s left)")
+            time.sleep(1)
+
+        log.error("[ERROR] 3 min mein YouTube login nahi hua — ye account skip")
+        page.close()
+        return False
+    except Exception as e:
+        log.error(f"[ERROR] YouTube session check: {e}")
+        try:
+            page.close()
+        except Exception:
+            pass
+        return False
 
 
 def ylh_login(page, email, password) -> bool:
@@ -136,6 +274,231 @@ def get_points(page):
 
 
 DAILY_LIMIT = 120  # YLH daily like limit
+
+LIKE_BUTTON_SELECTORS = [
+    "like-button-view-model button",
+    'button[aria-label*="like this video"]',
+    'button[aria-label*="Like this video"]',
+    "segmented-like-dislike-button-view-model like-button-view-model button",
+    "#top-level-buttons-computed like-button-view-model button",
+    "ytd-segmented-like-dislike-button-renderer like-button-view-model button",
+    "#segmented-like-button button",
+]
+
+
+def extract_video_id(url: str) -> str:
+    if not url:
+        return ""
+    if "watch?v=" in url:
+        return url.split("watch?v=")[1].split("&")[0]
+    if "/shorts/" in url:
+        return url.split("/shorts/")[1].split("?")[0].split("/")[0]
+    return ""
+
+
+def yt_like_state(yt_page) -> str:
+    """Liked if any like-button aria-label contains 'unlike this video'. No aria-pressed."""
+    try:
+        return yt_page.evaluate(
+            """
+            () => {
+                const nodes = document.querySelectorAll(
+                    'like-button-view-model button, ytd-segmented-like-dislike-button-renderer button, button[aria-label]'
+                );
+                for (const b of nodes) {
+                    const l = (b.getAttribute('aria-label') || '').toLowerCase();
+                    if (!l || l.includes('dislike')) continue;
+                    if (l.includes('unlike this video') || l.includes('unlike')) return 'liked';
+                    if (l.includes('like this video')) return 'unliked';
+                }
+                return 'unknown';
+            }
+            """
+        )
+    except Exception:
+        return "unknown"
+
+
+def yt_dismiss_overlays(yt_page):
+    for sel in [
+        'button[aria-label="Accept all"]',
+        'button:has-text("Accept all")',
+        'button:has-text("I agree")',
+        'button:has-text("No thanks")',
+        "#dismiss-button button",
+        'button[aria-label="Dismiss"]',
+    ]:
+        try:
+            el = yt_page.query_selector(sel)
+            if el and el.is_visible():
+                el.click(timeout=800)
+                time.sleep(0.4)
+        except Exception:
+            pass
+
+
+def yt_skip_ad(yt_page) -> bool:
+    for sel in [
+        ".ytp-skip-ad-button",
+        ".ytp-ad-skip-button-modern",
+        ".ytp-ad-skip-button",
+        "button.ytp-ad-skip-button-modern",
+    ]:
+        try:
+            el = yt_page.query_selector(sel)
+            if el and el.is_visible():
+                el.click(timeout=800)
+                log.info("  [YT] Ad skipped")
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def yt_ensure_playing(yt_page):
+    try:
+        paused = yt_page.evaluate(
+            """
+            () => {
+                const v = document.querySelector('video.html5-main-video, video');
+                if (!v) return true;
+                v.play().catch(() => {});
+                return v.paused;
+            }
+            """
+        )
+        if paused:
+            player = yt_page.query_selector("#movie_player, video.html5-main-video, video")
+            if player:
+                box = player.bounding_box()
+                if box and box["width"] > 20 and box["height"] > 20:
+                    yt_page.mouse.click(
+                        box["x"] + box["width"] * 0.5,
+                        box["y"] + box["height"] * 0.42,
+                    )
+    except Exception:
+        pass
+
+
+def yt_signed_out_prompt(yt_page) -> bool:
+    try:
+        return bool(
+            yt_page.evaluate(
+                """
+                () => {
+                    const t = (document.body && document.body.innerText || '').toLowerCase();
+                    return t.includes('sign in to like') || t.includes('sign in to youtube');
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def yt_watch_before_like(yt_page, seconds=None):
+    """Play the video and wait so YouTube treats the session as real engagement."""
+    yt_dismiss_overlays(yt_page)
+    yt_ensure_playing(yt_page)
+    watch = seconds if seconds is not None else random.uniform(15, 22)
+    log.info(f"  >> Watch before like: {watch:.1f}s")
+    end = time.time() + watch
+    while time.time() < end:
+        yt_skip_ad(yt_page)
+        yt_ensure_playing(yt_page)
+        time.sleep(1.0)
+
+
+def yt_click_like(yt_page) -> bool:
+    """
+    Find visible like button by checking ALL matching elements for non-zero bounding box.
+    .first is wrong - YouTube has multiple like buttons (hidden + visible).
+    Uses trusted Playwright mouse.click() for isTrusted=true events.
+    """
+    loc = None
+
+    # Scroll to where like button appears (200px from top works)
+    try:
+        yt_page.evaluate("window.scrollTo(0, 220)")
+        time.sleep(0.8)
+    except Exception:
+        pass
+
+    for sel in LIKE_BUTTON_SELECTORS:
+        try:
+            # Get ALL matching elements - pick the VISIBLE one (non-zero bounding box)
+            all_locs = yt_page.locator(sel).all()
+            for candidate in all_locs:
+                try:
+                    box = candidate.bounding_box()
+                    if not box or box.get("width", 0) == 0 or box.get("height", 0) == 0:
+                        continue  # Skip hidden/zero-dimension buttons
+                    label = (candidate.get_attribute("aria-label") or "").lower()
+                    if "dislike" in label:
+                        continue  # Skip dislike button
+                    if "unlike" in label:
+                        log.info("  [OK] YouTube already liked (unlike in label)")
+                        return True
+                    if "like" in label:
+                        log.info(f"  [FOUND] Visible like btn: sel='{sel}' box={box}")
+                        loc = candidate
+                        break
+                except Exception:
+                    continue
+            if loc:
+                break
+        except Exception:
+            continue
+
+    if loc is None:
+        log.warning("  [WARN] Like button not found (no visible element)")
+        return False
+
+    human_delay(0.4, 0.9)
+
+    def _trusted_click():
+        box = loc.bounding_box()
+        if box and box.get("width", 0) > 0:
+            yt_page.mouse.move(
+                box["x"] + box["width"] * 0.5 + random.uniform(-4, 4),
+                box["y"] + box["height"] * 0.5 + random.uniform(-3, 3),
+            )
+            time.sleep(random.uniform(0.15, 0.4))
+            yt_page.mouse.click(
+                box["x"] + box["width"] * 0.5,
+                box["y"] + box["height"] * 0.5,
+            )
+        else:
+            loc.click(timeout=4000)
+
+    _trusted_click()
+
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        if yt_like_state(yt_page) == "liked":
+            log.info("  [OK] YouTube liked! CHECK (label changed to unlike)")
+            return True
+        time.sleep(0.45)
+
+    log.info("  [RETRY] Like did not stick — clicking once more")
+    try:
+        _trusted_click()
+    except Exception:
+        try:
+            loc.click(timeout=3000)
+        except Exception:
+            pass
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if yt_like_state(yt_page) == "liked":
+            log.info("  [OK] YouTube liked! CHECK (retry)")
+            return True
+        time.sleep(0.45)
+
+    state = yt_like_state(yt_page)
+    log.info(f"  [WARN] YouTube like dom check: {state}")
+    return state == "liked"
 
 
 def do_one_view(views_page, context, seen_views: set) -> str:
@@ -279,7 +642,10 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
             Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
             window.chrome = {runtime: {}};
         """)
-        google_login(context, cookies_json)
+        if not google_login(context, cookies_json, account):
+            log.error(f"[VIEWS] YouTube not signed in for Account {acc_num} — skip")
+            browser.close()
+            return
         human_delay(2, 3)
 
         views_page = context.new_page()
@@ -411,8 +777,7 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
             human_delay(4, 5)
 
         yt_url = yt_page.url
-        if "watch?v=" in yt_url:
-            yt_video_id = yt_url.split("watch?v=")[1].split("&")[0]
+        yt_video_id = extract_video_id(yt_url)
 
         log.info(f"  >> YouTube: {yt_url[:70]} | ID: {yt_video_id}")
 
@@ -441,35 +806,8 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                 is_liked = False
                 try:
                     yt_page.wait_for_load_state("domcontentloaded", timeout=8000)
-                    time.sleep(1.5)  # Let React render
-                    for sel in [
-                        '#segmented-like-button button[aria-pressed]',
-                        'button[aria-label*="like this video"]',
-                        'button[aria-label*="Like this video"]',
-                        'ytd-segmented-like-dislike-button-renderer button',
-                        'yt-button-shape button[aria-pressed]',
-                    ]:
-                        try:
-                            btn = yt_page.wait_for_selector(sel, timeout=3000)
-                            if btn:
-                                label = (btn.get_attribute('aria-label') or '').lower()
-                                if 'dislike' not in label:
-                                    is_liked = btn.get_attribute('aria-pressed') == 'true'
-                                    break
-                        except Exception:
-                            pass
-                    if not is_liked:
-                        is_liked = bool(yt_page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll('button');
-                                for (const b of btns) {
-                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
-                                    if (l.includes('like') && !l.includes('dislike'))
-                                        return b.getAttribute('aria-pressed') === 'true';
-                                }
-                                return false;
-                            }
-                        """))
+                    time.sleep(2)
+                    is_liked = yt_like_state(yt_page) == "liked"
                 except Exception:
                     is_liked = True  # Assume liked if can't verify
 
@@ -508,35 +846,8 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
                 actually_liked = False
                 try:
                     yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    time.sleep(1.5)
-                    for sel in [
-                        '#segmented-like-button button[aria-pressed]',
-                        'button[aria-label*="like this video"]',
-                        'button[aria-label*="Like this video"]',
-                        'ytd-segmented-like-dislike-button-renderer button',
-                        'yt-button-shape button[aria-pressed]',
-                    ]:
-                        try:
-                            btn = yt_page.wait_for_selector(sel, timeout=4000)
-                            if btn:
-                                label = (btn.get_attribute('aria-label') or '').lower()
-                                if 'dislike' not in label:
-                                    actually_liked = btn.get_attribute('aria-pressed') == 'true'
-                                    break
-                        except Exception:
-                            pass
-                    if not actually_liked:
-                        actually_liked = bool(yt_page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll('button');
-                                for (const b of btns) {
-                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
-                                    // YouTube liked state = "unlike this video" in label
-                                    if (l.includes('unlike this video')) return true;
-                                }
-                                return false;
-                            }
-                        """))
+                    time.sleep(2)
+                    actually_liked = yt_like_state(yt_page) == "liked"
                 except Exception as e:
                     log.warning(f"  [DUP] verify error: {e} - assuming liked")
                     actually_liked = True
@@ -563,99 +874,38 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
         # Wait for YouTube page to be fully interactive
         try:
             yt_page.wait_for_load_state("domcontentloaded", timeout=10000)
-            time.sleep(2)  # Extra wait for React components to render
+            time.sleep(2)
         except Exception:
             pass
 
-        # Scroll to like button area
         try:
-            yt_page.mouse.wheel(0, random.randint(200, 400))
-            time.sleep(random.uniform(0.5, 1))
-            yt_page.mouse.wheel(0, random.randint(-50, -100))
-            time.sleep(0.5)
+            yt_page.mouse.wheel(0, random.randint(180, 360))
+            time.sleep(random.uniform(0.4, 0.9))
         except Exception:
             pass
 
-        # YouTube Like - try Playwright selectors first
         liked = False
         already_liked = False
 
-        like_selectors = [
-            'like-button-view-model button',                                    # Most direct ✓
-            'button[aria-label*="like this video"]',                            # Exact label ✓
-            'button[aria-label*="Like this video"]',
-            'segmented-like-dislike-button-view-model button[aria-label*="like this video"]',
-            '#segmented-like-button button',
-            'ytd-segmented-like-dislike-button-renderer button',
-        ]
+        yt_watch_before_like(yt_page)
 
-        for sel in like_selectors:
+        if yt_signed_out_prompt(yt_page) or not youtube_is_signed_in(yt_page):
+            log.warning("  [WARN] YouTube NOT signed in — like possible nahi, YLH confirm skip")
             try:
-                btn = yt_page.wait_for_selector(sel, timeout=6000)
-                if btn and btn.is_visible():
-                    label = (btn.get_attribute("aria-label") or "").lower()
-                    if "dislike" in label:
-                        continue  # Skip dislike button
-                    if "unlike" in label:
-                        # Already liked!
-                        log.warning("  [WARN] Video YouTube pe already liked hai! (unlike detected)")
-                        already_liked = True
-                    else:
-                        btn.scroll_into_view_if_needed()
-                        human_delay(0.5, 1)
-                        # JS click - YouTube's React events fire via JS
-                        yt_page.evaluate("(el) => el.click()", btn)
-                        time.sleep(2)  # Wait for async label update
-                        # Re-query DOM (stale ref won't update)
-                        label_after = yt_page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll('button');
-                                for (const b of btns) {
-                                    const l = (b.getAttribute('aria-label')||'').toLowerCase();
-                                    if (l.includes('unlike this video')) return 'unlike';
-                                    if (l.includes('like this video')) return 'like';
-                                }
-                                return 'unknown';
-                            }
-                        """)
-                        if label_after == 'unlike':
-                            log.info(f"  [OK] YouTube liked! ✓ (sel: {sel})")
-                        else:
-                            log.info(f"  [OK] YouTube like clicked (dom check: {label_after})")
-                        liked = True
-                    break
-            except Exception:
-                continue
-
-        # JS fallback - works in headless where CSS selectors may fail
-        if not liked and not already_liked:
-            try:
-                js_result = yt_page.evaluate("""
-                    () => {
-                        const btns = document.querySelectorAll('button');
-                        for (const b of btns) {
-                            const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                            if (label.includes('unlike this video')) {
-                                return 'already_liked: ' + label;
-                            }
-                            if (label.includes('like this video')) {
-                                b.click();
-                                return 'ok: ' + label;
-                            }
-                        }
-                        return 'not_found';
-                    }
-                """)
-                if js_result.startswith('already_liked:'):
-                    log.warning(f"  [WARN] Already liked (JS): {js_result}")
-                    already_liked = True
-                elif js_result.startswith('ok:'):
-                    log.info(f"  [OK] YouTube like JS: {js_result}")
-                    liked = True
-                else:
-                    log.warning(f"  [WARN] Like button nahi mila: {js_result}")
+                yt_page.close()
             except Exception:
                 pass
+            page.bring_to_front()
+            return "fail"
+
+        state = yt_like_state(yt_page)
+        if state == "liked":
+            log.warning("  [WARN] Video YouTube pe already liked hai! (unlike detected)")
+            already_liked = True
+        else:
+            liked = yt_click_like(yt_page)
+            if not liked:
+                log.warning("  [WARN] Like did not register after retry — still confirming on YLH")
 
         # Already liked on YouTube - YLH pe Skip karo, confirm mat karo
         if already_liked:
@@ -775,7 +1025,10 @@ def run_account(account: dict) -> str:
             window.chrome = {runtime: {}};
         """)
 
-        google_login(context, cookies_json)
+        if not google_login(context, cookies_json, account):
+            log.error(f"[SKIP] Account {acc_num}: YouTube signed in nahi — cookies refresh chahiye")
+            browser.close()
+            return "skip"
         human_delay(2, 3)
 
         main_page = context.new_page()
@@ -824,6 +1077,7 @@ def run_account(account: dict) -> str:
                 # Check if points actually earned
                 if curr and curr > prev_pts:
                     daily_likes += 1
+                    consecutive_no_pts = 0
                     log.info(f"[STATS] Like #{daily_likes}/{DAILY_LIMIT} | Points: {curr} | +{curr - start_pts} | Time: {elapsed}")
                     prev_pts = curr
                     if daily_likes >= DAILY_LIMIT:
