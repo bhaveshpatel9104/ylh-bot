@@ -20,31 +20,31 @@ ACCOUNTS = [
     {
         "num":    1,
         "email":  "patelbhavesh9130@gmail.com",
-        "password": "BHAVESH91045678VV",
+        "password": "BHAVESH9104V",
         "cookies_env": "GOOGLE_COOKIES",
     },
     {
         "num":    2,
         "email":  "222lovable222@gmail.com",
-        "password": "BHAVESH91045678VV",
+        "password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_2",
     },
     {
         "num":    3,
         "email":  "anti46286@gmail.com",
-        "password": "BHAVESH91045678VV",
+        "password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_3",
     },
     {
         "num":    4,
         "email":  "vercal400@gmail.com",
-        "password": "BHAVESH91045678VV",
+        "password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_4",
     },
     {
         "num":    5,
         "email":  "a31949377@gmail.com",
-        "password": "BHAVESH91045678VV",
+        "password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_5",
     },
 ]
