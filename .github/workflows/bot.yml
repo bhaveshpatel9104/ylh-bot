@@ -7,7 +7,7 @@ on:
 
 jobs:
   earn-points:
-    runs-on: self-hosted   # Home PC runner (stable IP = cookies never expire)
+    runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
@@ -23,9 +23,17 @@ jobs:
         run: |
           pip install playwright python-dotenv PyNaCl
           playwright install chromium
+          playwright install-deps chromium
+
+      - name: Start virtual display (Xvfb)
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          sleep 2
 
       - name: Run bot session
         env:
+          DISPLAY: ":99"
           GOOGLE_COOKIES:   ${{ secrets.GOOGLE_COOKIES }}
           GOOGLE_COOKIES_2: ${{ secrets.GOOGLE_COOKIES_2 }}
           GOOGLE_COOKIES_3: ${{ secrets.GOOGLE_COOKIES_3 }}
