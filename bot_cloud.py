@@ -1575,6 +1575,13 @@ def run():
                     run_views_session(acc_view, duration_seconds=view_duration)
                     if time.time() >= next_wake.timestamp():
                         break  # Time to go back to likes
+
+                # CRITICAL FIX: Wait remaining time until cooldown expires
+                # Prevents tight infinite loop when auth fails in views session
+                remaining = max((next_wake - datetime.now()).total_seconds(), 0)
+                if remaining > 10:
+                    log.info(f"[VIEWS] Cooldown remaining: {int(remaining/60)} min — sleeping...")
+                    time.sleep(remaining)
             else:
                 time.sleep(120)
             continue
