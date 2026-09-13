@@ -20,31 +20,36 @@ ACCOUNTS = [
     {
         "num":    1,
         "email":  "patelbhavesh9130@gmail.com",
-        "password": "BHAVESH9104V",
+        "password": "BHAVESH91045678VV",        # YouLikeHits password
+        "google_password": "BHAVESH9104V",       # Google account password (for auto-login)
         "cookies_env": "GOOGLE_COOKIES",
     },
     {
         "num":    2,
         "email":  "222lovable222@gmail.com",
-        "password": "BHAVESH9104VV",
+        "password": "BHAVESH91045678VV",
+        "google_password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_2",
     },
     {
         "num":    3,
         "email":  "anti46286@gmail.com",
-        "password": "BHAVESH9104VV",
+        "password": "BHAVESH91045678VV",
+        "google_password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_3",
     },
     {
         "num":    4,
         "email":  "vercal400@gmail.com",
-        "password": "BHAVESH9104VV",
+        "password": "BHAVESH91045678VV",
+        "google_password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_4",
     },
     {
         "num":    5,
         "email":  "a31949377@gmail.com",
-        "password": "BHAVESH9104VV",
+        "password": "BHAVESH91045678VV",
+        "google_password": "BHAVESH9104VV",
         "cookies_env": "GOOGLE_COOKIES_5",
     },
 ]
@@ -390,7 +395,7 @@ def google_login(context, cookies_json, acc=None) -> bool:
 
         # PERMANENT FIX: Auto re-login using stored credentials
         acc_email    = acc.get('email', '')    if acc else ''
-        acc_password = acc.get('password', '') if acc else ''
+        acc_password = acc.get('google_password', acc.get('password', '')) if acc else ''
         if acc_email and acc_password:
             log.info("[AUTO-LOGIN] Cookies expire ho gayi - auto re-login try kar raha hoon...")
             auto_ok = google_auto_login(context, acc_email, acc_password)
