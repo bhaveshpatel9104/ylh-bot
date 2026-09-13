@@ -11,3 +11,27 @@ logs/
 
 # Images
 *.png
+
+# Bot browser profiles
+chrome_bot_profiles/
+
+# Cookies and sensitive local data
+google_cookies*.json
+*.json
+!package*.json
+*.zip
+*.log
+logs.txt
+run45/
+latest_run/
+*.bat
+auto_refresh_cookies.py
+setup_accounts.py
+check_*.py
+debug_*.py
+patch_*.py
+scan_*.py
+save_cookies_account.py
+extract_chrome_cookies.py
+update_cookies_daily.py
+CURSOR_HANDOFF.txt
