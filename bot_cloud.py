@@ -220,6 +220,74 @@ def _update_github_secret(acc, cookies):
     except Exception as e:
         log.warning(f"[WARN] GitHub Secret update failed: {e}")
 
+def google_auto_login(context, email: str, password: str) -> bool:
+    """
+    PERMANENT FIX: Auto-login to Google using email+password.
+    Called when cookies are stale/expired. No manual intervention needed.
+    """
+    log.info(f"[AUTO-LOGIN] Cookies stale - trying auto-login for {email}...")
+    page = context.new_page()
+    try:
+        # Clear any stale state
+        page.goto("https://accounts.google.com/logout", wait_until="domcontentloaded", timeout=15000)
+        time.sleep(1)
+
+        # Go to sign-in page
+        page.goto(
+            "https://accounts.google.com/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
+            wait_until="domcontentloaded", timeout=20000
+        )
+        time.sleep(2)
+
+        # Enter email
+        email_input = page.locator('input[type="email"]')
+        email_input.wait_for(state="visible", timeout=10000)
+        email_input.fill(email)
+        time.sleep(1)
+        page.keyboard.press("Enter")
+        time.sleep(3)
+
+        # Enter password
+        pwd_input = page.locator('input[type="password"]')
+        pwd_input.wait_for(state="visible", timeout=10000)
+        pwd_input.fill(password)
+        time.sleep(1)
+        page.keyboard.press("Enter")
+        time.sleep(5)
+
+        # Check for 2FA or challenges
+        url = page.url
+        if "challenge" in url or "signin/v2/challenge" in url:
+            log.warning(f"[AUTO-LOGIN] 2FA/Challenge detected for {email} - waiting 30s...")
+            time.sleep(30)  # Wait for potential auto-approve or skip
+
+        # Verify on YouTube
+        page.goto("https://www.youtube.com", wait_until="networkidle", timeout=30000)
+        time.sleep(5)
+
+        if youtube_is_signed_in(page):
+            log.info(f"[AUTO-LOGIN] ✅ Successfully logged in as {email}!")
+            page.close()
+            return True
+        else:
+            # Try once more - sometimes needs extra navigation
+            page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
+            time.sleep(3)
+            if youtube_is_signed_in(page):
+                log.info(f"[AUTO-LOGIN] ✅ Logged in as {email} (2nd check)!")
+                page.close()
+                return True
+            log.error(f"[AUTO-LOGIN] ❌ Login failed for {email} - check password or 2FA")
+            page.close()
+            return False
+    except Exception as e:
+        log.error(f"[AUTO-LOGIN] Error: {e}")
+        try:
+            page.close()
+        except Exception:
+            pass
+        return False
+
 
 def google_login(context, cookies_json, acc=None) -> bool:
     """Return True only if YouTube is signed in AND API session is valid (not 401)."""
@@ -269,6 +337,22 @@ def google_login(context, cookies_json, acc=None) -> bool:
             return True
 
         log.warning("[WARN] YouTube NOT signed in — cookies stale / rejected")
+
+        # PERMANENT FIX: Auto re-login using stored credentials
+        acc_email    = acc.get('email', '')    if acc else ''
+        acc_password = acc.get('password', '') if acc else ''
+        if acc_email and acc_password:
+            log.info("[AUTO-LOGIN] Cookies expire ho gayi - auto re-login try kar raha hoon...")
+            auto_ok = google_auto_login(context, acc_email, acc_password)
+            if auto_ok:
+                save_context_cookies(context, acc)  # Save fresh cookies + update GitHub Secret
+                page.close()
+                return True
+            else:
+                log.error("[AUTO-LOGIN] Auto-login bhi fail — account skip")
+                page.close()
+                return False
+
         if os.environ.get("GITHUB_ACTIONS"):
             page.close()
             return False
@@ -1456,7 +1540,11 @@ def run():
             log.info(f"[DAILY] Account {acc['num']} {reason} - moving to next!")
         elif result == 'error':
             log.error(f"[ERROR] Account {acc['num']} login failed - skipping")
-            state['daily_done'] = True  # Skip this account
+            state['daily_done'] = True
+        elif result == 'skip':
+            # BUG FIX: cookies stale - mark done so we move to next account (don't loop!)
+            log.warning(f"[SKIP] Account {acc['num']} auth failed - moving to next account")
+            state['daily_done'] = True
 
         time.sleep(5)
 
