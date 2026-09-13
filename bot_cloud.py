@@ -223,63 +223,114 @@ def _update_github_secret(acc, cookies):
 def google_auto_login(context, email: str, password: str) -> bool:
     """
     PERMANENT FIX: Auto-login to Google using email+password.
-    Called when cookies are stale/expired. No manual intervention needed.
+    Robust: multiple selectors, handles Choose Account page, screenshots on failure.
     """
-    log.info(f"[AUTO-LOGIN] Cookies stale - trying auto-login for {email}...")
+    import urllib.parse
+    log.info(f"[AUTO-LOGIN] Cookies expire -- auto-login for {email}...")
     page = context.new_page()
     try:
-        # Clear any stale state
-        page.goto("https://accounts.google.com/logout", wait_until="domcontentloaded", timeout=15000)
-        time.sleep(1)
-
-        # Go to sign-in page
-        page.goto(
-            "https://accounts.google.com/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-            wait_until="domcontentloaded", timeout=20000
+        # Navigate with email pre-filled (skips Choose Account page)
+        login_url = (
+            "https://accounts.google.com/signin/v2/identifier"
+            f"?Email={urllib.parse.quote(email)}&hl=en"
+            "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
         )
-        time.sleep(2)
+        page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
+        time.sleep(3)
 
-        # Enter email
-        email_input = page.locator('input[type="email"]')
-        email_input.wait_for(state="visible", timeout=10000)
-        email_input.fill(email)
-        time.sleep(1)
+        # Handle "Choose account" screen
+        for txt in ["Use another account", "Use a different account"]:
+            try:
+                btn = page.locator(f'text="{txt}"')
+                if btn.is_visible(timeout=2000):
+                    btn.click()
+                    time.sleep(2)
+                    break
+            except Exception:
+                pass
+
+        # Enter email - multiple selectors
+        EMAIL_SELS = ['#identifierId', 'input[name="identifier"]',
+                      'input[type="email"]', 'input[autocomplete="username"]']
+        email_ok = False
+        for sel in EMAIL_SELS:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=3000):
+                    loc.fill(email)
+                    email_ok = True
+                    log.info(f"[AUTO-LOGIN] Email field: {sel}")
+                    break
+            except Exception:
+                continue
+
+        if not email_ok:
+            log.error(f"[AUTO-LOGIN] Email field not found! URL: {page.url}")
+            try:
+                page.screenshot(path="autologin_debug_email.png")
+            except Exception:
+                pass
+            page.close()
+            return False
+
         page.keyboard.press("Enter")
         time.sleep(3)
 
-        # Enter password
-        pwd_input = page.locator('input[type="password"]')
-        pwd_input.wait_for(state="visible", timeout=10000)
-        pwd_input.fill(password)
-        time.sleep(1)
-        page.keyboard.press("Enter")
-        time.sleep(5)
+        # Enter password - multiple selectors
+        PWD_SELS = ['input[type="password"]', 'input[name="password"]',
+                    'input[name="Passwd"]', 'input[autocomplete="current-password"]']
+        pwd_ok = False
+        for sel in PWD_SELS:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=5000):
+                    loc.fill(password)
+                    pwd_ok = True
+                    log.info(f"[AUTO-LOGIN] Password field: {sel}")
+                    break
+            except Exception:
+                continue
 
-        # Check for 2FA or challenges
+        if not pwd_ok:
+            log.error(f"[AUTO-LOGIN] Password field not found! URL: {page.url}")
+            try:
+                page.screenshot(path="autologin_debug_pwd.png")
+            except Exception:
+                pass
+            page.close()
+            return False
+
+        page.keyboard.press("Enter")
+        time.sleep(6)
+
+        # Handle 2FA / challenge
         url = page.url
-        if "challenge" in url or "signin/v2/challenge" in url:
-            log.warning(f"[AUTO-LOGIN] 2FA/Challenge detected for {email} - waiting 30s...")
-            time.sleep(30)  # Wait for potential auto-approve or skip
+        if any(x in url for x in ["challenge", "2sv", "signin/v2/challenge", "selectchallenge"]):
+            log.warning(f"[AUTO-LOGIN] 2FA detected for {email} -- waiting 60s...")
+            time.sleep(60)
 
         # Verify on YouTube
-        page.goto("https://www.youtube.com", wait_until="networkidle", timeout=30000)
+        try:
+            page.goto("https://www.youtube.com", wait_until="networkidle", timeout=30000)
+        except Exception:
+            page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
         time.sleep(5)
 
         if youtube_is_signed_in(page):
-            log.info(f"[AUTO-LOGIN] ✅ Successfully logged in as {email}!")
+            log.info(f"[AUTO-LOGIN] Login successful for {email}!")
             page.close()
             return True
-        else:
-            # Try once more - sometimes needs extra navigation
-            page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
-            time.sleep(3)
-            if youtube_is_signed_in(page):
-                log.info(f"[AUTO-LOGIN] ✅ Logged in as {email} (2nd check)!")
-                page.close()
-                return True
-            log.error(f"[AUTO-LOGIN] ❌ Login failed for {email} - check password or 2FA")
+
+        page.reload(wait_until="domcontentloaded", timeout=15000)
+        time.sleep(3)
+        if youtube_is_signed_in(page):
+            log.info(f"[AUTO-LOGIN] Login OK (2nd check) for {email}!")
             page.close()
-            return False
+            return True
+
+        log.error(f"[AUTO-LOGIN] Login failed for {email}. URL: {page.url}")
+        page.close()
+        return False
     except Exception as e:
         log.error(f"[AUTO-LOGIN] Error: {e}")
         try:
@@ -287,7 +338,6 @@ def google_auto_login(context, email: str, password: str) -> bool:
         except Exception:
             pass
         return False
-
 
 def google_login(context, cookies_json, acc=None) -> bool:
     """Return True only if YouTube is signed in AND API session is valid (not 401)."""
