@@ -63,26 +63,8 @@ def get_balance(page):
     return None
 
 def check_and_do_like(page, context):
-    try:
-        page.goto(KL_LIKES_URL, wait_until="networkidle", timeout=25000)
-        time.sleep(2)
-    except Exception as e:
-        log(f"Likes page load notice: {e}")
-        return False
-
-    if not is_logged_in(page):
-        log(">> Notice: Likes page not logged in (Session expired or logged in from another browser).")
-        return False
-
-    body = page.inner_text("body")
-    if "All caught up" in body or "No sites left" in body:
-        return False
-
-    btn_el = page.query_selector('button:has-text("Like & Earn")')
-    if not btn_el:
-        return False
-
-    # Capture site data from network before clicking
+    # CRITICAL: Register response listener BEFORE navigating.
+    # The '/api/v1/earn/sites/next' call happens during page load, not on button click.
     site_data = {"id": None, "dispatch_id": None}
 
     def on_response(resp):
@@ -92,10 +74,52 @@ def check_and_do_like(page, context):
                 if data.get("success") and data.get("data"):
                     site_data["id"] = data["data"].get("id")
                     site_data["dispatch_id"] = data["data"].get("dispatch_id")
+                    log(f">> Captured site data: id={site_data['id']} dispatch_id={site_data['dispatch_id']}")
             except Exception:
                 pass
 
     page.on("response", on_response)
+
+    try:
+        page.goto(KL_LIKES_URL, wait_until="networkidle", timeout=25000)
+        time.sleep(2)
+    except Exception as e:
+        log(f"Likes page load notice: {e}")
+        page.remove_listener("response", on_response)
+        return False
+
+    if not is_logged_in(page):
+        log(">> Notice: Likes page not logged in (Session expired or logged in from another browser).")
+        page.remove_listener("response", on_response)
+        return False
+
+    body = page.inner_text("body")
+    if "All caught up" in body or "No sites left" in body:
+        page.remove_listener("response", on_response)
+        return False
+
+    btn_el = page.query_selector('button:has-text("Like & Earn")')
+    if not btn_el:
+        page.remove_listener("response", on_response)
+        return False
+
+    # Fallback: if page load didn't trigger the API (e.g. cached), call it directly
+    if not site_data["id"]:
+        try:
+            api_result = page.evaluate("""
+                async () => {
+                    const r = await fetch('/api/v1/earn/sites/next?type_id=7&order=0', {
+                        headers: {'Accept': 'application/json'}
+                    });
+                    return await r.json();
+                }
+            """)
+            if api_result.get("success") and api_result.get("data"):
+                site_data["id"] = api_result["data"].get("id")
+                site_data["dispatch_id"] = api_result["data"].get("dispatch_id")
+                log(f">> Fallback site data fetch: id={site_data['id']} dispatch_id={site_data['dispatch_id']}")
+        except Exception as ex:
+            log(f">> Fallback fetch notice: {ex}")
 
     log(">> Active Like task found! Opening video popup...")
     try:
