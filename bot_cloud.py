@@ -938,7 +938,7 @@ def do_one_view(views_page, context, seen_views: set) -> str:
                 log.warning("[VIEW_LIMIT] Daily view limit reached!")
                 return 'view_daily_limit'
 
-        if "no videos" in content.lower() or "come back" in content.lower():
+        if "no videos available" in content.lower() or "no websites available" in content.lower():
             return 'novid'
 
         # Find View button - selector: a.earn-btn or a:has-text('View')
@@ -1216,41 +1216,52 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
             else:
                 log.warning("[DAILY_LIMIT] Daily 120 limit! Next account pe ja rahe hain.")
                 return 'daily_limit'
-        if "No videos" in content or "come back later" in content.lower():
+        if "no videos available" in content.lower() or "no websites available" in content.lower():
             return 'novid'
 
-        # Step 1: Click followbutton
-        follow_btn = None
-        try:
-            follow_btn = page.wait_for_selector("a.followbutton", timeout=8000)
-        except Exception:
-            pass
-        if not follow_btn:
-            # Check WHY followbutton nahi mila
-            page_content = page.content().lower()
-            title = page.title()
-            log.warning(f"[WARN] followbutton nahi mila | Title: {title[:50]}")
-            # Detect various "no more videos" states
-            if any(x in page_content for x in [
-                "no videos", "come back", "no more", "queue", "ran out",
-                "start liking", "login", "sign in"
-            ]):
-                log.info("[WAIT] No videos/session issue detected - novid return")
-                return 'novid'
-            return 'fail'
-
-        follow_btn.click()
-        human_delay(2, 3)
-
-        # Step 2: Click earn-btn
+        # Step 1: Check if already on single card view (a.earn-btn "Like Video" is visible!)
         earn_btn = None
-        try:
-            earn_btn = page.wait_for_selector("a.earn-btn", timeout=8000)
-        except Exception:
-            pass
+        for sel in ["a.earn-btn", "a:has-text('Like Video')", "button:has-text('Like Video')"]:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    earn_btn = el
+                    break
+            except Exception:
+                pass
+
+        # If not already on single card, click a.followbutton (from 6-grid view)
         if not earn_btn:
-            log.warning("[WARN] earn-btn nahi mila")
-            return 'fail'
+            follow_btn = None
+            for sel in ["a.followbutton", "a:has-text('Like')", ".followbutton"]:
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        follow_btn = el
+                        break
+                except Exception:
+                    pass
+
+            if follow_btn:
+                follow_btn.click()
+                human_delay(2, 3)
+                try:
+                    earn_btn = page.wait_for_selector("a.earn-btn, a:has-text('Like Video')", timeout=8000)
+                except Exception:
+                    pass
+
+        if not earn_btn:
+            page_content = page.content().lower()
+            if any(x in page_content for x in ["no videos available", "no websites available", "queue is empty"]):
+                log.info("[WAIT] Genuine 'no videos' message detected — novid return")
+                return 'novid'
+            log.warning("[WARN] Neither followbutton nor earn-btn found — reloading likes page...")
+            try:
+                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                human_delay(2, 3)
+            except Exception:
+                pass
+            return 'skip'
 
         try:
             with context.expect_page(timeout=10000) as new_page_info:
