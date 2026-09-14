@@ -36,3 +36,4 @@ extract_chrome_cookies.py
 update_cookies_daily.py
 CURSOR_HANDOFF.txt
 kingdomlikes_bot.py
+login_kingdomlikes.py
