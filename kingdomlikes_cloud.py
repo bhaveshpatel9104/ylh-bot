@@ -178,12 +178,14 @@ def check_and_do_like(page, context):
             if confirm_btn and not confirm_btn.is_disabled():
                 break
 
+        import uuid as _uuid
+        task_uuid = str(_uuid.uuid4())
+
         if confirm_btn and not confirm_btn.is_disabled():
             log(">> Clicking Confirm button (UI method)...")
             confirm_btn.click()
         elif site_data["id"]:
             # Method 2: Direct API verify call (bypasses hasFocus() check entirely)
-            task_uuid = str(__import__('uuid').uuid4())
             log(f">> UI Confirm not found. Using direct API verify for site {site_data['id']}...")
             verify_result = page.evaluate("""
                 async ([site_id, task_uuid, dispatch_id]) => {
@@ -202,21 +204,65 @@ def check_and_do_like(page, context):
                 }
             """, [site_data["id"], task_uuid, site_data["dispatch_id"]])
             log(">> Direct verify result: " + str(verify_result))
+            # Check if verify itself failed hard (not just pending)
+            if verify_result.get("success") is False:
+                log(">> Verify rejected by server. Skipping.")
+                return False
         else:
             log(">> Confirm button not found and no site data captured.")
             return False
 
-        # Wait for backend verification to complete (up to 35s)
-        bal_before = get_balance(page)
-        for tick in range(1, 36):
-            time.sleep(1)
-            cur = get_balance(page)
-            if cur is not None and bal_before is not None and cur > bal_before:
-                earned = cur - bal_before
-                log(f">> [POINTS CREDITED] +{earned} Credits awarded! New Balance: {cur} (Verified in {tick}s)")
+        # Poll task status API to detect when verification completes
+        # Endpoint: GET /api/v1/earn/tasks/{task_uuid}/status
+        log(f">> Polling task status for uuid={task_uuid[:8]}...")
+        for tick in range(1, 45):
+            time.sleep(2)
+            status_resp = page.evaluate("""
+                async (task_uuid) => {
+                    try {
+                        const r = await fetch(`/api/v1/earn/tasks/${task_uuid}/status`, {
+                            headers: {'Accept': 'application/json'}
+                        });
+                        return await r.json();
+                    } catch(e) { return { error: e.toString() }; }
+                }
+            """, task_uuid)
+            task_status = (status_resp.get("data") or {}).get("status", "") if status_resp.get("success") else ""
+            if tick % 5 == 0:
+                log(f"   [{tick*2}s] Task status: {task_status}")
+            if task_status in ("completed", "approved", "verified"):
+                log(f">> [TASK COMPLETED] Status={task_status} in {tick*2}s")
+                # Reload balance from fresh page evaluation
+                try:
+                    bal_js = page.evaluate("""
+                        async () => {
+                            const r = await fetch('/api/v1/user/balance', {headers: {'Accept': 'application/json'}});
+                            const d = await r.json();
+                            return d.data ? (d.data.balance || d.data.credits || null) : null;
+                        }
+                    """)
+                    if bal_js:
+                        log(f">> [POINTS CREDITED] New Balance via API: {bal_js}")
+                except Exception:
+                    pass
                 return True
+            elif task_status in ("failed", "rejected", "error"):
+                log(f">> Task {task_status}. Server rejected verification.")
+                return False
+            # 404 or unknown endpoint - fall back to balance polling
+            if status_resp.get("success") is False and tick == 5:
+                log(">> Task status API not available. Falling back to balance check.")
+                break
 
-        log(">> Verification window completed (balance may update later).")
+        # Fallback: check if balance changed on the page
+        try:
+            page.reload(wait_until="networkidle", timeout=15000)
+            cur_bal = get_balance(page)
+            log(f">> Post-verify balance check: {cur_bal}")
+        except Exception:
+            pass
+
+        log(">> Verification polling done.")
         return True
     except Exception as e:
         log(f">> Like task notice: {e}")
