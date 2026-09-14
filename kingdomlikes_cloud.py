@@ -47,35 +47,51 @@ def check_and_do_like(page, context):
     if "All caught up" in body or "No sites left" in body:
         return False
 
-    btn_el = page.query_selector('button:has-text("Like"), a:has-text("Like")')
+    btn_el = page.query_selector('button:has-text("Like & Earn")')
     if not btn_el:
         return False
 
     log(">> Active Like task found! Opening video popup...")
     try:
-        with page.expect_popup(timeout=12000) as popup_info:
+        with page.expect_popup(timeout=15000) as popup_info:
             btn_el.click()
         popup = popup_info.value
         log(f">> Like popup opened: {popup.url}")
-        time.sleep(4)
+
+        # Wait for YouTube redirect / load
+        for _ in range(12):
+            time.sleep(1)
+            if "youtube" in (popup.title() or "").lower() or "youtube.com" in popup.url or "youtu.be" in popup.url:
+                break
+        time.sleep(3)
 
         # Attempt like in popup
         res = popup.evaluate("""
             () => {
-                const btn = document.querySelector('like-button-view-model button, button[aria-label*="like this video" i], button[aria-label*="like" i]');
-                if (btn) {
-                    const isLiked = btn.getAttribute('aria-pressed') === 'true';
-                    if (!isLiked) {
-                        btn.click();
-                        return 'Liked video';
+                const selectors = [
+                    'like-button-view-model button',
+                    'ytd-segmented-like-dislike-button-renderer button',
+                    'segmented-like-dislike-button-view-model button',
+                    'button[aria-label*="like this video" i]',
+                    'button[aria-label*="like" i]'
+                ];
+                for (const s of selectors) {
+                    const btn = document.querySelector(s);
+                    if (btn) {
+                        const isLiked = btn.getAttribute('aria-pressed') === 'true' || 
+                                        (btn.getAttribute('aria-label') || '').toLowerCase().includes('unlike');
+                        if (!isLiked) {
+                            btn.click();
+                            return 'Liked video: ' + s;
+                        }
+                        return 'Already liked: ' + s;
                     }
-                    return 'Already liked';
                 }
                 return 'Like button not found';
             }
         """)
         log(f">> Like action: {res}")
-        time.sleep(6)
+        time.sleep(5)
 
         if not popup.is_closed():
             popup.close()
@@ -285,6 +301,8 @@ def main():
             success = do_one_view(page, context)
             if success:
                 views_done += 1
+
+            if success or has_like:
                 consecutive_empty = 0
                 cur_bal = get_balance(page)
                 log(f">> [PROGRESS] Views: {views_done} | Likes: {likes_done} | Balance: {cur_bal}")
