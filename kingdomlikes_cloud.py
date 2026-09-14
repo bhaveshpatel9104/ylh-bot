@@ -82,6 +82,21 @@ def check_and_do_like(page, context):
     if not btn_el:
         return False
 
+    # Capture site data from network before clicking
+    site_data = {"id": None, "dispatch_id": None}
+
+    def on_response(resp):
+        if "/api/v1/earn/sites/next" in resp.url and resp.request.method == "GET":
+            try:
+                data = resp.json()
+                if data.get("success") and data.get("data"):
+                    site_data["id"] = data["data"].get("id")
+                    site_data["dispatch_id"] = data["data"].get("dispatch_id")
+            except Exception:
+                pass
+
+    page.on("response", on_response)
+
     log(">> Active Like task found! Opening video popup...")
     try:
         with page.expect_popup(timeout=15000) as popup_info:
@@ -109,7 +124,7 @@ def check_and_do_like(page, context):
                 for (const s of selectors) {
                     const btn = document.querySelector(s);
                     if (btn) {
-                        const isLiked = btn.getAttribute('aria-pressed') === 'true' || 
+                        const isLiked = btn.getAttribute('aria-pressed') === 'true' ||
                                         (btn.getAttribute('aria-label') || '').toLowerCase().includes('unlike');
                         if (!isLiked) {
                             btn.click();
@@ -127,55 +142,61 @@ def check_and_do_like(page, context):
         if not popup.is_closed():
             popup.close()
 
-        # Critical: In headless Chrome, document.hasFocus() returns False even after popup closes.
-        # KingdomLikes JS (Le() function) checks hasFocus() before unlocking Confirm button.
-        # Force focus and trigger visibilitychange to make KingdomLikes unlock the Confirm button.
-        try:
-            page.bring_to_front()
-            page.evaluate("""
-                () => {
-                    window.focus();
-                    document.dispatchEvent(new Event('focus'));
-                    document.dispatchEvent(new Event('visibilitychange'));
-                }
-            """)
-        except Exception:
-            pass
+        # Remove response listener
+        page.remove_listener("response", on_response)
 
-        # Wait for Confirm button to appear (up to 8s)
+        # Method 1: Try UI Confirm button (now with hasFocus() patched in init script)
+        time.sleep(2)
         confirm_btn = None
-        for i in range(8):
+        for i in range(6):
             time.sleep(1)
             confirm_btn = page.query_selector('button:has-text("Confirm")')
             if confirm_btn and not confirm_btn.is_disabled():
                 break
-            # Re-trigger focus events each second
-            try:
-                page.evaluate("() => { window.focus(); document.dispatchEvent(new Event('visibilitychange')); }")
-            except Exception:
-                pass
 
         if confirm_btn and not confirm_btn.is_disabled():
+            log(">> Clicking Confirm button (UI method)...")
             confirm_btn.click()
-            log(">> Clicked Confirm. Waiting for KingdomLikes backend verification...")
-
-            # Wait on the page for async verification to complete (up to 35s)
-            bal_before = get_balance(page)
-            for tick in range(1, 36):
-                time.sleep(1)
-                cur = get_balance(page)
-                if cur is not None and bal_before is not None and cur > bal_before:
-                    earned = cur - bal_before
-                    log(f">> [POINTS CREDITED] +{earned} Credits awarded! New Balance: {cur} (Verified in {tick}s)")
-                    return True
-
-            log(">> Verification window completed.")
-            return True
+        elif site_data["id"]:
+            # Method 2: Direct API verify call (bypasses hasFocus() check entirely)
+            task_uuid = str(__import__('uuid').uuid4())
+            log(f">> UI Confirm not found. Using direct API verify for site {site_data['id']}...")
+            verify_result = page.evaluate("""
+                async ([site_id, task_uuid, dispatch_id]) => {
+                    try {
+                        const res = await fetch(`/api/v1/earn/sites/${site_id}/verify`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json',
+                                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split(';').find(c => c.trim().startsWith('XSRF-TOKEN'))?.split('=')[1] || '')
+                            },
+                            body: JSON.stringify({ task_uuid: task_uuid, dispatch_id: dispatch_id })
+                        });
+                        return await res.json();
+                    } catch(e) { return { error: e.toString() }; }
+                }
+            """, [site_data["id"], task_uuid, site_data["dispatch_id"]])
+            log(">> Direct verify result: " + str(verify_result))
         else:
-            log(">> Confirm button was not ready or not found.")
+            log(">> Confirm button not found and no site data captured.")
             return False
+
+        # Wait for backend verification to complete (up to 35s)
+        bal_before = get_balance(page)
+        for tick in range(1, 36):
+            time.sleep(1)
+            cur = get_balance(page)
+            if cur is not None and bal_before is not None and cur > bal_before:
+                earned = cur - bal_before
+                log(f">> [POINTS CREDITED] +{earned} Credits awarded! New Balance: {cur} (Verified in {tick}s)")
+                return True
+
+        log(">> Verification window completed (balance may update later).")
+        return True
     except Exception as e:
         log(f">> Like task notice: {e}")
+        page.remove_listener("response", on_response)
         return False
 
 def do_one_view(page, context):
@@ -311,11 +332,17 @@ def main():
             viewport={"width": 1280, "height": 800}
         )
 
-        # Stealth evasion scripts
+        # Stealth evasion scripts + hasFocus() fix for headless mode
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            // Override hasFocus to always return true in headless mode
+            // KingdomLikes' Le() function checks document.hasFocus() before unlocking Confirm button
+            const _hasFocus = document.hasFocus.bind(document);
+            Object.defineProperty(document, 'hasFocus', { value: () => true, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
         """)
 
         # 1. Inject KingdomLikes cookies
