@@ -1,4 +1,4 @@
-name: YouLikeHits Points Bot
+name: YouLikeHits & KingdomLikes Points Bot
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  earn-points:
+  youlikehits-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
@@ -31,7 +31,7 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
           sleep 2
 
-      - name: Run bot session
+      - name: Run YLH bot session
         env:
           DISPLAY: ":99"
           GOOGLE_COOKIES:   ${{ secrets.GOOGLE_COOKIES }}
@@ -45,6 +45,39 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bot-logs-${{ github.run_number }}
+          name: ylh-bot-logs-${{ github.run_number }}
           path: logs/
           retention-days: 7
+
+  kingdomlikes-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright python-dotenv PyNaCl
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Start virtual display (Xvfb)
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          sleep 2
+
+      - name: Run KingdomLikes bot session
+        env:
+          DISPLAY: ":99"
+          KL_EMAIL: ${{ secrets.KL_EMAIL || 'patelbhavesh9130@gmail.com' }}
+          KL_PASSWORD: ${{ secrets.KL_PASSWORD || 'BHAVESH91045678VV' }}
+          GOOGLE_COOKIES: ${{ secrets.GOOGLE_COOKIES }}
+        run: python kingdomlikes_cloud.py
