@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import json
+import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
@@ -1275,6 +1276,21 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
 
         log.info(f"  >> YouTube: {yt_url[:70]} | ID: {yt_video_id}")
 
+        # Check for Google rate-limit / captcha redirect
+        if "google.com/sorry" in yt_url or not yt_video_id:
+            log.warning(f"  [WARN] Google sorry page / invalid URL ({yt_url[:50]}) — skipping task on YLH")
+            yt_page.close()
+            page.bring_to_front()
+            try:
+                sl = page.wait_for_selector("text=Skip", timeout=3000)
+                if sl:
+                    sl.click()
+                    human_delay(1, 2)
+            except Exception:
+                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
+                human_delay(2, 3)
+            return 'skip'
+
         # DUPLICATE CHECK - verify on YouTube first (don't blindly skip!)
         if yt_video_id and yt_video_id in seen_videos:
             perm_key  = yt_video_id + "_PERM"
@@ -1384,12 +1400,17 @@ def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str
         yt_watch_before_like(yt_page)
 
         if yt_signed_out_prompt(yt_page) or not youtube_is_signed_in(yt_page):
-            log.warning("  [WARN] YouTube NOT signed in — like possible nahi, YLH confirm skip")
+            log.warning("  [WARN] YouTube NOT signed in — like possible nahi, YLH task skip")
             try:
                 yt_page.close()
             except Exception:
                 pass
             page.bring_to_front()
+            try:
+                sl = page.wait_for_selector("text=Skip", timeout=3000)
+                if sl: sl.click(); human_delay(1, 2)
+            except Exception:
+                page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
             return "fail"
 
         state = yt_like_state(yt_page)
@@ -1631,32 +1652,16 @@ def run_account(account: dict) -> str:
                 time.sleep(random.uniform(1, 3))
 
             elif result == 'novid':
-                consecutive_no_vid += 1
-                log.info(f"[WAIT] No videos available (#{consecutive_no_vid}) - 5 min wait...")
-                if consecutive_no_vid >= 3:
-                    log.info("[RESET] seen_videos reset kar raha hoon - naye videos ke liye")
-                    seen_videos = set()
-                    consecutive_no_vid = 0
-                    round_num += 1
-                time.sleep(300)  # 5 min wait
-                try:
-                    main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
-                    human_delay(2, 3)
-                except Exception:
-                    pass
+                log.info(f"[NOVID] No like videos available on YLH — switching immediately to Views mode to keep farming!")
+                return exit_session('novid')
 
             elif result == 'fail':
                 consecutive_fails += 1
                 log.warning(f"[WARN] Fail #{consecutive_fails}")
-                if consecutive_fails >= 5:
-                    log.warning("[WARN] 5 consecutive fails - page reload kar raha hoon")
-                    consecutive_fails = 0
-                    try:
-                        main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
-                        human_delay(3, 5)
-                    except Exception:
-                        pass
-                time.sleep(random.uniform(5, 15))
+                if consecutive_fails >= 3:
+                    log.warning("[WARN] 3 consecutive fails (e.g. YouTube auth/captcha issue) — switching immediately to Views mode to keep farming!")
+                    return exit_session('novid')
+                time.sleep(random.uniform(5, 10))
 
         # Timeout ya unexpected exit
         return exit_session('hour_limit')
