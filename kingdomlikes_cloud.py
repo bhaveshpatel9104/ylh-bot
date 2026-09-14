@@ -221,6 +221,13 @@ def main():
             viewport={"width": 1280, "height": 800}
         )
 
+        # Stealth evasion scripts
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        """)
+
         # 1. Inject KingdomLikes cookies
         try:
             kl_cookies = json.loads(KL_COOKIES_RAW)
@@ -242,13 +249,22 @@ def main():
         page = context.new_page()
 
         log("Navigating to https://kingdomlikes.com/free_points ...")
-        page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=35000)
-        time.sleep(3)
+        try:
+            page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=40000)
+            time.sleep(3)
+        except Exception as e:
+            log(f"Nav notice: {e}")
+
+        log(f"Current URL: {page.url} | Title: {page.title()}")
 
         # Verify active session
         body = page.inner_text("body")
-        if "login" in page.url.lower() or "Enter the Kingdom" in body:
+        if "login" in page.url.lower() or "Enter the Kingdom" in body or "AUTHENTICATION FAILED" in body:
             log("ERROR: Session cookie rejected or expired. Please re-run auto_refresh_cookies.py on your PC.")
+            log(f"Page diagnostic: URL={page.url}, Title={page.title()}")
+            for line in body.split("\n")[:15]:
+                if line.strip():
+                    log(f"   [DOM] {line.strip()}")
             browser.close()
             sys.exit(1)
 
