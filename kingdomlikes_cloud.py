@@ -2,7 +2,11 @@
 KingdomLikes Cloud Bot for GitHub Actions
 =========================================
 Runs headlessly in Ubuntu runner on GitHub Actions using injected session cookies.
-No login form, no captcha needed!
+Completely rewritten based on KingdomLikes Vue 3 / Inertia architecture:
+- Zero unnecessary reloads: preserves Vue Power Queue background verification.
+- Native UI Confirm flow: avoids fake endpoints and let Vue handle verify/status.
+- Headless focus & modal auto-dismiss: handles 'Don't close so fast' and focus traps.
+- Graceful queue handling when YouTube tasks are temporarily empty.
 """
 
 import os
@@ -62,85 +66,93 @@ def get_balance(page):
         pass
     return None
 
-def check_and_do_like(page, context):
-    # CRITICAL: Register response listener BEFORE navigating.
-    # The '/api/v1/earn/sites/next' call happens during page load, not on button click.
-    site_data = {"id": None, "dispatch_id": None}
-
-    def on_response(resp):
-        if "/api/v1/earn/sites/next" in resp.url and resp.request.method == "GET":
-            try:
-                data = resp.json()
-                if data.get("success") and data.get("data"):
-                    site_data["id"] = data["data"].get("id")
-                    site_data["dispatch_id"] = data["data"].get("dispatch_id")
-                    log(f">> Captured site data: id={site_data['id']} dispatch_id={site_data['dispatch_id']}")
-            except Exception:
-                pass
-
-    page.on("response", on_response)
-
+def dismiss_modals_if_any(page):
+    """Dismisses any EarnAlertModal that might pop up (e.g. 'Don't close so fast!' or 'Interaction not detected')."""
     try:
-        page.goto(KL_LIKES_URL, wait_until="networkidle", timeout=25000)
+        btn = page.query_selector('button:has-text("Got it"), button:has-text("OK"), button:has-text("I understand")')
+        if btn and btn.is_visible():
+            txt = btn.inner_text().strip()
+            log(f">> Dismissing warning modal with button '{txt}'...")
+            btn.click()
+            time.sleep(1)
+            return True
+    except Exception:
+        pass
+    return False
+
+def wait_for_verifying_slots(page, max_wait_sec=30):
+    """Waits for active 'verifying' slots in the Power Queue to finish before switching pages."""
+    start = time.time()
+    while time.time() - start < max_wait_sec:
+        dismiss_modals_if_any(page)
+        slots_verifying = page.evaluate("""
+            () => {
+                const slots = Array.from(document.querySelectorAll('div[data-slot-id]'));
+                return slots.filter(s => (s.className || '').includes('from-violet')).length;
+            }
+        """)
+        if not slots_verifying:
+            break
         time.sleep(2)
-    except Exception as e:
-        log(f"Likes page load notice: {e}")
-        page.remove_listener("response", on_response)
-        return False
+
+def check_and_do_like(page, context):
+    """
+    Executes one YouTube Like task on the current page.
+    Assumes page is already at KL_LIKES_URL (or navigates only once if on another page).
+    """
+    dismiss_modals_if_any(page)
+
+    if KL_LIKES_URL not in page.url:
+        try:
+            log("Navigating to YouTube Likes page...")
+            page.goto(KL_LIKES_URL, wait_until="networkidle", timeout=30000)
+            time.sleep(3)
+        except Exception as e:
+            log(f"Likes page load notice: {e}")
+            return False
 
     if not is_logged_in(page):
         log(">> Notice: Likes page not logged in (Session expired or logged in from another browser).")
-        page.remove_listener("response", on_response)
         return False
 
     body = page.inner_text("body")
     if "All caught up" in body or "No sites left" in body:
         log(">> Likes Queue: All caught up / No sites left.")
-        page.remove_listener("response", on_response)
         return False
 
     btn_el = page.query_selector('button:has-text("Like & Earn")')
     if not btn_el:
-        # Log first 300 chars of body to diagnose what's on the page
-        preview = " | ".join(l.strip() for l in body.split("\n") if l.strip())[:300]
-        log(f">> No 'Like & Earn' button found. Page preview: {preview}")
-        page.remove_listener("response", on_response)
+        # Check if awaiting confirm from previous step
+        confirm_btn = page.query_selector('button:has-text("Confirm")')
+        if confirm_btn and not confirm_btn.is_disabled():
+            log(">> Found existing active Confirm button, clicking...")
+            confirm_btn.click()
+            time.sleep(3)
+            return True
+
+        preview = " | ".join(l.strip() for l in body.split("\n") if l.strip())[:250]
+        log(f">> No 'Like & Earn' button found. Page state: {preview}")
         return False
 
-    # Fallback: if page load didn't trigger the API (e.g. cached), call it directly
-    if not site_data["id"]:
-        try:
-            api_result = page.evaluate("""
-                async () => {
-                    const r = await fetch('/api/v1/earn/sites/next?type_id=7&order=0', {
-                        headers: {'Accept': 'application/json'}
-                    });
-                    return await r.json();
-                }
-            """)
-            if api_result.get("success") and api_result.get("data"):
-                site_data["id"] = api_result["data"].get("id")
-                site_data["dispatch_id"] = api_result["data"].get("dispatch_id")
-                log(f">> Fallback site data fetch: id={site_data['id']} dispatch_id={site_data['dispatch_id']}")
-        except Exception as ex:
-            log(f">> Fallback fetch notice: {ex}")
-
     log(">> Active Like task found! Opening video popup...")
+    popup = None
     try:
         with page.expect_popup(timeout=15000) as popup_info:
             btn_el.click()
         popup = popup_info.value
         log(f">> Like popup opened: {popup.url}")
 
-        # Wait for YouTube redirect / load
+        # Wait for YouTube redirect & load
         for _ in range(12):
             time.sleep(1)
-            if "youtube" in (popup.title() or "").lower() or "youtube.com" in popup.url or "youtu.be" in popup.url:
+            p_url = (popup.url or "").lower()
+            p_title = (popup.title() or "").lower()
+            if "youtube.com" in p_url or "youtu.be" in p_url or "youtube" in p_title:
                 break
-        time.sleep(3)
+        time.sleep(4)
 
-        # Attempt like in popup
-        res = popup.evaluate("""
+        # Attempt like on YouTube
+        like_res = popup.evaluate("""
             () => {
                 const selectors = [
                     'like-button-view-model button',
@@ -156,130 +168,97 @@ def check_and_do_like(page, context):
                                         (btn.getAttribute('aria-label') || '').toLowerCase().includes('unlike');
                         if (!isLiked) {
                             btn.click();
-                            return 'Liked video: ' + s;
+                            return { status: 'clicked', selector: s };
                         }
-                        return 'Already liked: ' + s;
+                        return { status: 'already_liked', selector: s };
                     }
                 }
-                return 'Like button not found';
+                return { status: 'not_found' };
             }
         """)
-        log(">> Like action: " + str(res))
-        time.sleep(5)
+        log(f">> Like action: {like_res.get('status')} ({like_res.get('selector', '')})")
 
-        if not popup.is_closed():
-            popup.close()
+        # Keep video open for 6-8 seconds to allow YouTube engagement tracking to register
+        time.sleep(6)
 
-        # Remove response listener
-        page.remove_listener("response", on_response)
+        # Ensure main page is focused
+        page.bring_to_front()
+        dismiss_modals_if_any(page)
 
-        # Method 1: Try UI Confirm button (now with hasFocus() patched in init script)
-        time.sleep(2)
+        # In KingdomLikes Vue architecture:
+        # Fe() auto-closes the popup when Confirm is clicked!
+        # Clicking Confirm before closing popup prevents the 'closed too fast' alert modal.
         confirm_btn = None
-        for i in range(6):
-            time.sleep(1)
+        for _ in range(10):
+            dismiss_modals_if_any(page)
             confirm_btn = page.query_selector('button:has-text("Confirm")')
             if confirm_btn and not confirm_btn.is_disabled():
                 break
-
-        import uuid as _uuid
-        task_uuid = str(_uuid.uuid4())
+            time.sleep(1)
 
         if confirm_btn and not confirm_btn.is_disabled():
-            log(">> Clicking Confirm button (UI method)...")
+            log(">> Clicking Confirm button...")
             confirm_btn.click()
-        elif site_data["id"]:
-            # Method 2: Direct API verify call (bypasses hasFocus() check entirely)
-            log(f">> UI Confirm not found. Using direct API verify for site {site_data['id']}...")
-            verify_result = page.evaluate("""
-                async ([site_id, task_uuid, dispatch_id]) => {
-                    try {
-                        const res = await fetch(`/api/v1/earn/sites/${site_id}/verify`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split(';').find(c => c.trim().startsWith('XSRF-TOKEN'))?.split('=')[1] || '')
-                            },
-                            body: JSON.stringify({ task_uuid: task_uuid, dispatch_id: dispatch_id })
-                        });
-                        return await res.json();
-                    } catch(e) { return { error: e.toString() }; }
-                }
-            """, [site_data["id"], task_uuid, site_data["dispatch_id"]])
-            log(">> Direct verify result: " + str(verify_result))
-            # Check if verify itself failed hard (not just pending)
-            if verify_result.get("success") is False:
-                log(">> Verify rejected by server. Skipping.")
-                return False
-        else:
-            log(">> Confirm button not found and no site data captured.")
-            return False
-
-        # Poll task status API to detect when verification completes
-        # Endpoint: GET /api/v1/earn/tasks/{task_uuid}/status
-        log(f">> Polling task status for uuid={task_uuid[:8]}...")
-        for tick in range(1, 45):
             time.sleep(2)
-            status_resp = page.evaluate("""
-                async (task_uuid) => {
-                    try {
-                        const r = await fetch(`/api/v1/earn/tasks/${task_uuid}/status`, {
-                            headers: {'Accept': 'application/json'}
-                        });
-                        return await r.json();
-                    } catch(e) { return { error: e.toString() }; }
-                }
-            """, task_uuid)
-            task_status = (status_resp.get("data") or {}).get("status", "") if status_resp.get("success") else ""
-            if tick % 5 == 0:
-                log(f"   [{tick*2}s] Task status: {task_status}")
-            if task_status in ("completed", "approved", "verified"):
-                log(f">> [TASK COMPLETED] Status={task_status} in {tick*2}s")
-                # Reload balance from fresh page evaluation
-                try:
-                    bal_js = page.evaluate("""
-                        async () => {
-                            const r = await fetch('/api/v1/user/balance', {headers: {'Accept': 'application/json'}});
-                            const d = await r.json();
-                            return d.data ? (d.data.balance || d.data.credits || null) : null;
-                        }
-                    """)
-                    if bal_js:
-                        log(f">> [POINTS CREDITED] New Balance via API: {bal_js}")
-                except Exception:
-                    pass
-                return True
-            elif task_status in ("failed", "rejected", "error"):
-                log(f">> Task {task_status}. Server rejected verification.")
-                return False
-            # 404 or unknown endpoint - fall back to balance polling
-            if status_resp.get("success") is False and tick == 5:
-                log(">> Task status API not available. Falling back to balance check.")
-                break
+        else:
+            log(">> Confirm button not enabled. Closing popup and retrying Confirm...")
+            if popup and not popup.is_closed():
+                popup.close()
+            time.sleep(2)
+            dismiss_modals_if_any(page)
+            confirm_btn = page.query_selector('button:has-text("Confirm")')
+            if confirm_btn:
+                confirm_btn.click()
+                time.sleep(2)
 
-        # Fallback: check if balance changed on the page
+        # Close popup if still open
         try:
-            page.reload(wait_until="networkidle", timeout=15000)
-            cur_bal = get_balance(page)
-            log(f">> Post-verify balance check: {cur_bal}")
+            if popup and not popup.is_closed():
+                popup.close()
         except Exception:
             pass
 
-        log(">> Verification polling done.")
+        dismiss_modals_if_any(page)
+
+        # Check Power Queue for active slot
+        slot_status = page.evaluate("""
+            () => {
+                const slots = Array.from(document.querySelectorAll('div[data-slot-id]'));
+                const active = slots.find(s => (s.className || '').includes('from-violet') || (s.className || '').includes('from-emerald'));
+                if (active) {
+                    return { id: active.getAttribute('data-slot-id'), isSuccess: (active.className || '').includes('from-emerald') };
+                }
+                return null;
+            }
+        """)
+        if slot_status:
+            log(f">> Task queued in Power Queue: {slot_status}")
+        else:
+            log(">> Task dispatched to verification queue.")
+
         return True
+
     except Exception as e:
         log(f">> Like task notice: {e}")
-        page.remove_listener("response", on_response)
+        if popup and not popup.is_closed():
+            try:
+                popup.close()
+            except Exception:
+                pass
         return False
 
 def do_one_view(page, context):
-    try:
-        page.goto(KL_VIEWS_URL, wait_until="networkidle", timeout=25000)
-        time.sleep(2)
-    except Exception as e:
-        log(f"Views page load notice: {e}")
-        return False
+    """Executes one YouTube View task on the views page."""
+    dismiss_modals_if_any(page)
+
+    if KL_VIEWS_URL not in page.url:
+        try:
+            log("Navigating to YouTube Views page...")
+            page.goto(KL_VIEWS_URL, wait_until="networkidle", timeout=30000)
+            time.sleep(3)
+        except Exception as e:
+            log(f"Views page load notice: {e}")
+            return False
 
     if not is_logged_in(page):
         log(">> Notice: Views page not logged in (Session expired or logged in from another browser).")
@@ -299,6 +278,7 @@ def do_one_view(page, context):
     task_credits = credits_m.group(1) if credits_m else "?"
     log(f">> Starting View task (+{task_credits} Credits)...")
 
+    popup = None
     try:
         with page.expect_popup(timeout=15000) as popup_info:
             play_btn.click()
@@ -346,7 +326,7 @@ def do_one_view(page, context):
             if tick % 15 == 0:
                 log(f"   [{tick}s] Timer: {status.get('timer')} | Unlocked: {status.get('unlocked')}")
                 try:
-                    if not popup.is_closed():
+                    if popup and not popup.is_closed():
                         popup.evaluate("() => { const v = document.querySelector('video'); if (v && v.paused) v.play(); }")
                 except Exception:
                     pass
@@ -361,7 +341,7 @@ def do_one_view(page, context):
                     break
 
         try:
-            if not popup.is_closed():
+            if popup and not popup.is_closed():
                 popup.close()
         except Exception:
             pass
@@ -375,6 +355,11 @@ def do_one_view(page, context):
 
     except Exception as e:
         log(f">> View task notice: {e}")
+        if popup and not popup.is_closed():
+            try:
+                popup.close()
+            except Exception:
+                pass
         return False
 
 def main():
@@ -397,6 +382,7 @@ def main():
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
+                "--disable-popup-blocking",
                 "--no-sandbox",
                 "--disable-dev-shm-usage"
             ]
@@ -411,9 +397,7 @@ def main():
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            // Override hasFocus to always return true in headless mode
-            // KingdomLikes' Le() function checks document.hasFocus() before unlocking Confirm button
-            const _hasFocus = document.hasFocus.bind(document);
+            // Override hasFocus and visibilityState so Vue Le() never blocks in headless runner
             Object.defineProperty(document, 'hasFocus', { value: () => true, configurable: true });
             Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
             Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
@@ -439,9 +423,9 @@ def main():
 
         page = context.new_page()
 
-        log("Navigating to https://kingdomlikes.com/free_points ...")
+        log("Navigating to https://kingdomlikes.com/free_points/youtube-likes ...")
         try:
-            page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=40000)
+            page.goto(KL_LIKES_URL, wait_until="networkidle", timeout=40000)
             time.sleep(3)
         except Exception as e:
             log(f"Nav notice: {e}")
@@ -452,10 +436,6 @@ def main():
         body = page.inner_text("body")
         if "login" in page.url.lower() or "Enter the Kingdom" in body or "AUTHENTICATION FAILED" in body:
             log("ERROR: Session cookie rejected or expired. Please re-run auto_refresh_cookies.py on your PC.")
-            log(f"Page diagnostic: URL={page.url}, Title={page.title()}")
-            for line in body.split("\n")[:15]:
-                if line.strip():
-                    log(f"   [DOM] {line.strip()}")
             browser.close()
             sys.exit(1)
 
@@ -465,6 +445,8 @@ def main():
         consecutive_empty = 0
 
         while (time.time() - session_start) < (MAX_SESSION_MINUTES * 60):
+            dismiss_modals_if_any(page)
+
             # Check session status
             if not is_logged_in(page):
                 log("=" * 60)
@@ -474,7 +456,7 @@ def main():
                 log("=" * 60)
                 break
 
-            # 1. Farm Likes first (while likes queue has tasks)
+            # 1. Farm Likes first (while on likes page)
             has_like = check_and_do_like(page, context)
             if has_like:
                 likes_done += 1
@@ -484,7 +466,10 @@ def main():
                 time.sleep(2)
                 continue
 
-            # 2. If Likes queue is empty, farm Views
+            # Before switching away from Likes, allow active verifying slots to settle
+            wait_for_verifying_slots(page, max_wait_sec=20)
+
+            # 2. If Likes queue has no tasks, farm Views
             success = do_one_view(page, context)
             if success:
                 views_done += 1
@@ -496,10 +481,12 @@ def main():
 
             # 3. Both queues empty
             consecutive_empty += 1
-            wait_sec = min(60, 15 * consecutive_empty)
-            log(f">> Both queues idle. Sleeping {wait_sec}s before next check...")
+            wait_sec = min(90, 30 * consecutive_empty)
+            log(f">> Both queues idle (no YouTube tasks available). Sleeping {wait_sec}s before next check...")
             time.sleep(wait_sec)
 
+        # Before finishing, wait for any remaining verifying slots
+        wait_for_verifying_slots(page, max_wait_sec=30)
         end_bal = get_balance(page) or 0
         earned = end_bal - start_bal
         log("=" * 60)
