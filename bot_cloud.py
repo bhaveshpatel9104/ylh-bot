@@ -545,18 +545,25 @@ def extract_video_id(url: str) -> str:
 
 
 def yt_like_state(yt_page) -> str:
-    """Liked if any like-button aria-label contains 'unlike this video'. No aria-pressed."""
+    """Accurately check liked status using aria-pressed (modern YouTube standard) with fallback."""
     try:
         return yt_page.evaluate(
             """
             () => {
                 const nodes = document.querySelectorAll(
-                    'like-button-view-model button, ytd-segmented-like-dislike-button-renderer button, button[aria-label]'
+                    'button[aria-label*="like" i], like-button-view-model button, ytd-segmented-like-dislike-button-renderer button, #segmented-like-button button'
                 );
                 for (const b of nodes) {
                     const l = (b.getAttribute('aria-label') || '').toLowerCase();
                     if (!l || l.includes('dislike')) continue;
-                    if (l.includes('unlike this video') || l.includes('unlike')) return 'liked';
+
+                    // Modern YouTube uses aria-pressed="true" (liked) and "false" (unliked)
+                    const pressed = b.getAttribute('aria-pressed');
+                    if (pressed === 'true') return 'liked';
+                    if (pressed === 'false') return 'unliked';
+
+                    // Legacy / mobile fallbacks
+                    if (l.includes('unlike')) return 'liked';
                     if (l.includes('like this video')) return 'unliked';
                 }
                 return 'unknown';
@@ -675,18 +682,17 @@ def yt_click_like(yt_page) -> bool:
                 if state == "liked":
                     log.info("  [OK] API like confirmed in DOM!")
                     return True
-                log.info(f"  [API] Sent OK but DOM state: {state} (may update async)")
-                return True  # Trust API 200 response even if DOM lags
+                log.info(f"  [API] API like sent but DOM state is '{state}' — falling back to UI button click!")
     except Exception as e:
         log.warning(f"  [API] Error: {e}")
 
     # ---- METHOD 2: Trusted mouse click (fallback) ----
-    log.info("  [FALLBACK] Trying trusted mouse click...")
+    log.info("  [FALLBACK] Trying trusted mouse click on visible like button...")
     loc = None
 
     # Scroll to where like button appears
     try:
-        yt_page.evaluate("window.scrollTo(0, 220)")
+        yt_page.evaluate("window.scrollBy(0, 300)")
         time.sleep(0.8)
     except Exception:
         pass
@@ -700,12 +706,13 @@ def yt_click_like(yt_page) -> bool:
                     if not box or box.get("width", 0) == 0 or box.get("height", 0) == 0:
                         continue
                     label = (candidate.get_attribute("aria-label") or "").lower()
+                    pressed = candidate.get_attribute("aria-pressed")
                     if "dislike" in label:
                         continue
-                    if "unlike" in label:
-                        log.info("  [OK] YouTube already liked (unlike in label)")
+                    if pressed == "true" or "unlike" in label:
+                        log.info("  [OK] YouTube already liked (pressed=true or unlike in label)")
                         return True
-                    if "like" in label:
+                    if pressed == "false" or "like" in label:
                         log.info(f"  [FOUND] Visible like btn: sel='{sel}' box={box}")
                         loc = candidate
                         break
@@ -1593,10 +1600,18 @@ def run_account(account: dict) -> str:
                         else:
                             seen_videos.add(vid + "_NOPT")
                     log.info(f"[STATS] Like done (no pts) | Total: {total_likes} | Daily earned: {daily_likes}/{DAILY_LIMIT} | Consec 0-pts: {consecutive_no_pts}")
-                    # Account exhausted check: 8 consecutive 0-pts = move to next account
-                    if consecutive_no_pts >= 8:
-                        log.info(f"[ACC {acc_num}] 8 consecutive 0-pts - account tasks exhausted! Next account...")
-                        return exit_session('exhausted')
+                    # When consecutive 0-pts happen, reset cache & skip so YLH gives fresh videos (NEVER abandon account prematurely!)
+                    if consecutive_no_pts >= 6:
+                        log.info(f"[ACC {acc_num}] 6 consecutive 0-pts — resetting seen_videos cache & refreshing page for fresh videos")
+                        seen_videos = set()
+                        consecutive_no_pts = 0
+                        try:
+                            skip_link = main_page.query_selector("text=Skip")
+                            if skip_link:
+                                skip_link.click()
+                                human_delay(1.5, 2.5)
+                        except Exception:
+                            pass
                 # Grid view pe wapas jaao
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
@@ -1691,10 +1706,12 @@ def run():
             if result == 'hour_limit':
                 state['like_cooldown_until'] = datetime.now() + timedelta(minutes=HOUR_COOLDOWN_MINS)
                 log.info(f"[COOL] Account {acc['num']} likes cooldown until {state['like_cooldown_until'].strftime('%H:%M')}")
-            elif result in ('daily_limit', 'done', 'exhausted'):
+            elif result in ('daily_limit', 'done'):
                 state['likes_daily_done'] = True
-                reason = 'tasks exhausted' if result == 'exhausted' else 'daily limit'
-                log.info(f"[DAILY] Account {acc['num']} likes {reason} - switching to views mode!")
+                log.info(f"[DAILY] Account {acc['num']} likes daily limit reached (120 likes) — switching to views mode!")
+            elif result == 'novid':
+                state['like_cooldown_until'] = datetime.now() + timedelta(minutes=15)
+                log.info(f"[NOVID] Account {acc['num']} no videos available right now — retry at {state['like_cooldown_until'].strftime('%H:%M')}")
             elif result in ('error', 'skip'):
                 state['likes_disabled'] = True
                 log.warning(f"[ACC {acc['num']}] Google auth failed — Likes disabled. Account will farm points via Views!")
