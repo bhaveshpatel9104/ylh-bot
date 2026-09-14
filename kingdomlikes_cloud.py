@@ -121,21 +121,47 @@ def check_and_do_like(page, context):
                 return 'Like button not found';
             }
         """)
-        log(f">> Like action: {res}")
+        log(">> Like action: " + str(res))
         time.sleep(5)
 
         if not popup.is_closed():
             popup.close()
 
-        time.sleep(3)
-        confirm_btn = page.query_selector('button:has-text("Confirm")')
+        # Critical: In headless Chrome, document.hasFocus() returns False even after popup closes.
+        # KingdomLikes JS (Le() function) checks hasFocus() before unlocking Confirm button.
+        # Force focus and trigger visibilitychange to make KingdomLikes unlock the Confirm button.
+        try:
+            page.bring_to_front()
+            page.evaluate("""
+                () => {
+                    window.focus();
+                    document.dispatchEvent(new Event('focus'));
+                    document.dispatchEvent(new Event('visibilitychange'));
+                }
+            """)
+        except Exception:
+            pass
+
+        # Wait for Confirm button to appear (up to 8s)
+        confirm_btn = None
+        for i in range(8):
+            time.sleep(1)
+            confirm_btn = page.query_selector('button:has-text("Confirm")')
+            if confirm_btn and not confirm_btn.is_disabled():
+                break
+            # Re-trigger focus events each second
+            try:
+                page.evaluate("() => { window.focus(); document.dispatchEvent(new Event('visibilitychange')); }")
+            except Exception:
+                pass
+
         if confirm_btn and not confirm_btn.is_disabled():
             confirm_btn.click()
             log(">> Clicked Confirm. Waiting for KingdomLikes backend verification...")
 
-            # Wait on the page for async verification to complete (up to 32s)
+            # Wait on the page for async verification to complete (up to 35s)
             bal_before = get_balance(page)
-            for tick in range(1, 33):
+            for tick in range(1, 36):
                 time.sleep(1)
                 cur = get_balance(page)
                 if cur is not None and bal_before is not None and cur > bal_before:
