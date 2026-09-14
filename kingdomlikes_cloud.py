@@ -131,10 +131,23 @@ def check_and_do_like(page, context):
         confirm_btn = page.query_selector('button:has-text("Confirm")')
         if confirm_btn and not confirm_btn.is_disabled():
             confirm_btn.click()
-            time.sleep(4)
+            log(">> Clicked Confirm. Waiting for KingdomLikes backend verification...")
 
-        log(">> Completed Like task!")
-        return True
+            # Wait on the page for async verification to complete (up to 32s)
+            bal_before = get_balance(page)
+            for tick in range(1, 33):
+                time.sleep(1)
+                cur = get_balance(page)
+                if cur is not None and bal_before is not None and cur > bal_before:
+                    earned = cur - bal_before
+                    log(f">> [POINTS CREDITED] +{earned} Credits awarded! New Balance: {cur} (Verified in {tick}s)")
+                    return True
+
+            log(">> Verification window completed.")
+            return True
+        else:
+            log(">> Confirm button was not ready or not found.")
+            return False
     except Exception as e:
         log(f">> Like task notice: {e}")
         return False
@@ -334,28 +347,31 @@ def main():
                 log("=" * 60)
                 break
 
-            # 1. Check Likes first
+            # 1. Farm Likes first (while likes queue has tasks)
             has_like = check_and_do_like(page, context)
             if has_like:
                 likes_done += 1
                 consecutive_empty = 0
-                time.sleep(3)
+                cur_bal = get_balance(page)
+                log(f">> [PROGRESS] Views: {views_done} | Likes: {likes_done} | Balance: {cur_bal}")
+                time.sleep(2)
+                continue
 
-            # 2. Farm Views (Main engine)
+            # 2. If Likes queue is empty, farm Views
             success = do_one_view(page, context)
             if success:
                 views_done += 1
-
-            if success or has_like:
                 consecutive_empty = 0
                 cur_bal = get_balance(page)
                 log(f">> [PROGRESS] Views: {views_done} | Likes: {likes_done} | Balance: {cur_bal}")
-                time.sleep(3)
-            else:
-                consecutive_empty += 1
-                wait_sec = min(60, 15 * consecutive_empty)
-                log(f">> Both queues idle. Sleeping {wait_sec}s before next check...")
-                time.sleep(wait_sec)
+                time.sleep(2)
+                continue
+
+            # 3. Both queues empty
+            consecutive_empty += 1
+            wait_sec = min(60, 15 * consecutive_empty)
+            log(f">> Both queues idle. Sleeping {wait_sec}s before next check...")
+            time.sleep(wait_sec)
 
         end_bal = get_balance(page) or 0
         earned = end_bal - start_bal
