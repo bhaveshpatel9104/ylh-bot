@@ -57,6 +57,7 @@ ACCOUNTS = [
 YLH_LOGIN_URL         = "https://www.youlikehits.com/login.php"
 YLH_YOUTUBE_LIKES_URL = "https://www.youlikehits.com/youtubelikes.php"
 YLH_YOUTUBE_VIEWS_URL = "https://www.youlikehits.com/youtubenew2.php"
+YLH_BONUS_URL         = "https://www.youlikehits.com/bonuspoints.php"
 
 # Logging
 logging.basicConfig(
@@ -458,6 +459,53 @@ def ylh_login(page, email, password) -> bool:
         return False
     except Exception as e:
         log.error(f"[ERROR] YLH login: {e}")
+        return False
+
+
+def ylh_claim_daily_bonus(page, acc_num: int) -> bool:
+    """
+    Check and claim Daily Bonus points on YouLikeHits (https://www.youlikehits.com/bonuspoints.php).
+    Milestones: 10 hits (+10), 25 hits (+25), 50 hits (+50), 100 hits (+200).
+    Up to 285 FREE bonus points per account per day!
+    """
+    try:
+        log.info(f"[BONUS] Checking Daily Bonus for Account {acc_num}...")
+        page.goto(YLH_BONUS_URL, wait_until="domcontentloaded", timeout=20000)
+        time.sleep(2)
+
+        claim_btn = None
+        for sel in [
+            ".bonus-pill--active",
+            "a.bonus-pill:not(:has-text('No bonus'))",
+            "a:has-text('Claim')",
+            "button:has-text('Claim')",
+            "input[value*='Claim']"
+        ]:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    claim_btn = el
+                    break
+            except Exception:
+                pass
+
+        if claim_btn:
+            btn_text = (claim_btn.inner_text() or claim_btn.get_attribute("value") or "").strip()
+            log.info(f"[BONUS] Found active claim button: '{btn_text}' — claiming now!")
+            claim_btn.click()
+            time.sleep(3)
+            log.info(f"[BONUS] ✓ Daily Bonus claimed for Account {acc_num}!")
+            return True
+        else:
+            body = page.inner_text("body") or ""
+            m = re.search(r'(\d+\s*/\s*\d+\s*hits)', body)
+            hits_str = m.group(1) if m else "checked"
+            m_rem = re.search(r'(\d+\s*hits to go)', body)
+            rem_str = f" ({m_rem.group(1)})" if m_rem else ""
+            log.info(f"[BONUS] Acc {acc_num}: No bonus ready yet. Status: {hits_str}{rem_str}")
+            return False
+    except Exception as e:
+        log.warning(f"[BONUS] Acc {acc_num} check error: {e}")
         return False
 
 
@@ -1083,6 +1131,12 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
             return
         human_delay(1, 2)
 
+        # Check and auto-claim Daily Bonus right away on login
+        try:
+            ylh_claim_daily_bonus(views_page, acc_num)
+        except Exception:
+            pass
+
         try:
             views_page.goto(YLH_YOUTUBE_VIEWS_URL, wait_until="domcontentloaded", timeout=20000)
             human_delay(2, 3)
@@ -1090,6 +1144,7 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
             browser.close()
             return
 
+        last_res = 'done'
         while time.time() < deadline:
             result = do_one_view(views_page, context, seen_views)
 
@@ -1101,6 +1156,7 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
 
             elif result in ('view_hour_limit', 'view_daily_limit'):
                 log.info(f"[VIEWS] Acc {acc_num}: {result} - stopping views")
+                last_res = result
                 break
 
             elif result == 'novid':
@@ -1119,8 +1175,15 @@ def run_views_session(account: dict, duration_seconds: int = 3600) -> None:
                     break
                 time.sleep(30)
 
+        # Check and auto-claim Daily Bonus on bonuspoints.php!
+        try:
+            ylh_claim_daily_bonus(views_page, acc_num)
+        except Exception:
+            pass
+
         browser.close()
     log.info(f"[VIEWS] Acc {acc_num} session done: {view_count} total views")
+    return last_res
 
 
 def do_one_like(page, context, seen_videos: set, last_video: list = None) -> str:
@@ -1460,6 +1523,12 @@ def run_account(account: dict) -> str:
             browser.close()
             return 'error'
 
+        # Check and auto-claim Daily Bonus right away on login
+        try:
+            ylh_claim_daily_bonus(main_page, acc_num)
+        except Exception:
+            pass
+
         start_pts = get_points(main_page) or 0
         log.info(f"[POINTS] Start: {start_pts}")
 
@@ -1477,20 +1546,26 @@ def run_account(account: dict) -> str:
 
         log.info(f"[BOT] Continuous loop - Daily limit: {DAILY_LIMIT} likes")
 
+        def exit_session(status: str) -> str:
+            try:
+                ylh_claim_daily_bonus(main_page, acc_num)
+            except Exception:
+                pass
+            browser.close()
+            return status
+
         while True:
             result = do_one_like(main_page, context, seen_videos, last_video)
 
             if result == 'hour_limit':
                 curr = get_points(main_page)
                 log.info(f"[ACC {acc_num}] Hourly limit! Earned: {daily_likes} likes so far.")
-                browser.close()
-                return 'hour_limit'
+                return exit_session('hour_limit')
 
             elif result == 'daily_limit':
                 curr = get_points(main_page)
                 log.info(f"[ACC {acc_num}] Daily limit done! Total: {daily_likes} likes.")
-                browser.close()
-                return 'daily_limit'
+                return exit_session('daily_limit')
 
             elif result == 'ok':
                 total_likes += 1
@@ -1506,8 +1581,7 @@ def run_account(account: dict) -> str:
                     prev_pts = curr
                     if daily_likes >= DAILY_LIMIT:
                         log.info(f"[ACC {acc_num}] {DAILY_LIMIT} likes done! Next account...")
-                        browser.close()
-                        return 'done'
+                        return exit_session('done')
                 else:
                     consecutive_no_pts += 1
                     vid = last_video[0]
@@ -1522,8 +1596,7 @@ def run_account(account: dict) -> str:
                     # Account exhausted check: 8 consecutive 0-pts = move to next account
                     if consecutive_no_pts >= 8:
                         log.info(f"[ACC {acc_num}] 8 consecutive 0-pts - account tasks exhausted! Next account...")
-                        browser.close()
-                        return 'exhausted'
+                        return exit_session('exhausted')
                 # Grid view pe wapas jaao
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
@@ -1532,13 +1605,9 @@ def run_account(account: dict) -> str:
                     pass
                 time.sleep(random.uniform(1, 5))
 
-
-
-
             elif result == 'skip':
                 consecutive_fails = 0
                 consecutive_no_vid = 0
-                # Grid pe wapas jaao (skip ke baad bhi followbutton chahiye)
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=20000)
                     human_delay(2, 3)
@@ -1550,13 +1619,11 @@ def run_account(account: dict) -> str:
                 consecutive_no_vid += 1
                 log.info(f"[WAIT] No videos available (#{consecutive_no_vid}) - 5 min wait...")
                 if consecutive_no_vid >= 3:
-                    # Reset seen videos - purane videos phir available ho sakte hain
                     log.info("[RESET] seen_videos reset kar raha hoon - naye videos ke liye")
                     seen_videos = set()
                     consecutive_no_vid = 0
                     round_num += 1
                 time.sleep(300)  # 5 min wait
-                # Reload page
                 try:
                     main_page.goto(YLH_YOUTUBE_LIKES_URL, wait_until="domcontentloaded", timeout=30000)
                     human_delay(2, 3)
@@ -1577,18 +1644,17 @@ def run_account(account: dict) -> str:
                 time.sleep(random.uniform(5, 15))
 
         # Timeout ya unexpected exit
-        browser.close()
-        return 'hour_limit'
+        return exit_session('hour_limit')
 
 
 def run():
-    """Round-robin: 5 accounts, hourly cooldown, daily tracking."""
+    """Round-robin: 5 accounts, likes + views, continuous farming, daily bonus auto-claim."""
     from datetime import timedelta
-    HOUR_COOLDOWN_MINS = 65  # 65 min baad retry
+    HOUR_COOLDOWN_MINS = 65  # 65 min baad likes retry
 
     log.info("=" * 50)
-    log.info("[BOT] Round-Robin Mode - 5 accounts")
-    log.info("[BOT] Hourly: 30/acc | Daily: 120/acc | Max: 600/day")
+    log.info("[BOT] Round-Robin Continuous Mode - 5 accounts")
+    log.info("[BOT] Likes + Views Continuous Farming | Daily Bonus Auto-Claim")
     log.info("=" * 50)
 
     # State per account
@@ -1596,93 +1662,122 @@ def run():
     for acc in ACCOUNTS:
         states[acc['num']] = {
             'account': acc,
-            'daily_done': False,
-            'cooldown_until': None,
+            'likes_daily_done': False,
+            'likes_disabled': False,
+            'views_daily_done': False,
+            'like_cooldown_until': None,
+            'view_cooldown_until': None,
             'has_cookies': bool(get_cookies(acc)),
         }
 
     while True:
         now = datetime.now()
 
-        # Available: has cookies, not daily done, not on cooldown
-        available = [
+        # Step 1: Check if any account is ready for Likes
+        available_likes = [
             s for s in states.values()
             if s['has_cookies']
-            and not s['daily_done']
-            and (s['cooldown_until'] is None or now >= s['cooldown_until'])
+            and not s['likes_daily_done']
+            and not s['likes_disabled']
+            and (s['like_cooldown_until'] is None or now >= s['like_cooldown_until'])
         ]
 
-        if not available:
-            # Check future availability
-            future = [
-                s for s in states.values()
-                if s['has_cookies'] and not s['daily_done']
-            ]
-            if not future:
-                log.info("=" * 50)
-                log.info("[DONE] Sabhi 5 accounts ki daily limit ho gayi!")
-                log.info("[DONE] Kal subah phir se chalu hoga!")
-                log.info("=" * 50)
-                break
+        if available_likes:
+            state = available_likes[0]
+            acc = state['account']
+            log.info(f"\n>>> Account {acc['num']}/5 (Likes): {acc['email']}")
+            result = run_account(acc)
 
-            # Instead of sleeping, run VIEWS for all accounts!
-            cooldowns = [s['cooldown_until'] for s in future if s['cooldown_until']]
-            if cooldowns:
-                next_wake = min(cooldowns)
-                wait_secs = max((next_wake - now).total_seconds(), 0)
-                log.info(f"[VIEWS] All likes on cooldown - switching to Views!")
-                log.info(f"[VIEWS] Running views for {int(wait_secs/60)} min until {next_wake.strftime('%H:%M')}")
+            if result == 'hour_limit':
+                state['like_cooldown_until'] = datetime.now() + timedelta(minutes=HOUR_COOLDOWN_MINS)
+                log.info(f"[COOL] Account {acc['num']} likes cooldown until {state['like_cooldown_until'].strftime('%H:%M')}")
+            elif result in ('daily_limit', 'done', 'exhausted'):
+                state['likes_daily_done'] = True
+                reason = 'tasks exhausted' if result == 'exhausted' else 'daily limit'
+                log.info(f"[DAILY] Account {acc['num']} likes {reason} - switching to views mode!")
+            elif result in ('error', 'skip'):
+                state['likes_disabled'] = True
+                log.warning(f"[ACC {acc['num']}] Google auth failed — Likes disabled. Account will farm points via Views!")
 
-                # Run views for each account during cooldown
-                num_future = len(future)
-                per_acc_duration = max(int(wait_secs / max(num_future, 1)) - 30, 180)
-                for s in future:
-                    now_ts = time.time()
-                    wake_ts = next_wake.timestamp()
-                    if now_ts >= wake_ts - 60:
-                        break  # Time to go back to likes
-                    time_left = int(wake_ts - now_ts) - 30
-                    acc_duration = min(per_acc_duration, time_left)
-                    if acc_duration < 60:
-                        break
-
-                    acc_view = s['account']
-                    log.info(f"[VIEWS] Starting Account {acc_view['num']} views ({acc_duration//60} min)...")
-                    run_views_session(acc_view, duration_seconds=acc_duration)
-
-                # CRITICAL FIX: Wait remaining time until cooldown expires
-                # Prevents tight infinite loop when auth fails in views session
-                remaining = max((next_wake - datetime.now()).total_seconds(), 0)
-                if remaining > 10:
-                    log.info(f"[VIEWS] Cooldown remaining: {int(remaining/60)} min — sleeping...")
-                    time.sleep(remaining)
-            else:
-                time.sleep(120)
+            time.sleep(5)
             continue
 
-        # Run next available account
-        state = available[0]
-        acc = state['account']
+        # Step 2: No account ready for Likes right now -> Switch to VIEWS!
+        available_views = [
+            s for s in states.values()
+            if not s['views_daily_done']
+            and (s['view_cooldown_until'] is None or now >= s['view_cooldown_until'])
+        ]
 
-        log.info(f"\n>>> Account {acc['num']}/5: {acc['email']}")
-        result = run_account(acc)
+        if available_views:
+            # Check if any account is waiting on a like cooldown
+            active_like_cooldowns = [
+                s['like_cooldown_until'] for s in states.values()
+                if s['like_cooldown_until']
+                and not s['likes_daily_done']
+                and not s['likes_disabled']
+            ]
 
-        if result == 'hour_limit':
-            state['cooldown_until'] = datetime.now() + timedelta(minutes=HOUR_COOLDOWN_MINS)
-            log.info(f"[COOL] Account {acc['num']} cooldown until {state['cooldown_until'].strftime('%H:%M')}")
-        elif result in ('daily_limit', 'done', 'exhausted'):
-            state['daily_done'] = True
-            reason = 'tasks exhausted' if result == 'exhausted' else 'daily limit'
-            log.info(f"[DAILY] Account {acc['num']} {reason} - moving to next!")
-        elif result == 'error':
-            log.error(f"[ERROR] Account {acc['num']} login failed - skipping")
-            state['daily_done'] = True
-        elif result == 'skip':
-            # BUG FIX: cookies stale - mark done so we move to next account (don't loop!)
-            log.warning(f"[SKIP] Account {acc['num']} auth failed - moving to next account")
-            state['daily_done'] = True
+            if active_like_cooldowns:
+                next_wake = min(active_like_cooldowns)
+                wait_secs = max((next_wake - now).total_seconds(), 60)
+                log.info(f"[VIEWS] Likes on cooldown until {next_wake.strftime('%H:%M')} — running Views ({int(wait_secs/60)} min)!")
+            else:
+                # Continuous Views farming mode (likes disabled or completed)
+                wait_secs = 1800  # 30 min per round across available accounts
+                next_wake = now + timedelta(seconds=wait_secs)
+                log.info(f"[VIEWS] Continuous Views Mode across {len(available_views)} accounts ({int(wait_secs/60)} min cycle)!")
 
-        time.sleep(5)
+            num_v = len(available_views)
+            per_acc_duration = max(int(wait_secs / max(num_v, 1)) - 20, 180)  # at least 3 min (1 video)
+
+            for s in available_views:
+                now_ts = time.time()
+                # If likes cooldown expired, switch back to likes!
+                if active_like_cooldowns and now_ts >= min(active_like_cooldowns).timestamp() - 30:
+                    log.info("[VIEWS] Like cooldown expired — returning to Likes mode!")
+                    break
+
+                acc_view = s['account']
+                log.info(f"[VIEWS] Starting Account {acc_view['num']} views ({per_acc_duration//60} min)...")
+                v_res = run_views_session(acc_view, duration_seconds=per_acc_duration)
+
+                if v_res == 'view_hour_limit':
+                    s['view_cooldown_until'] = datetime.now() + timedelta(minutes=60)
+                    log.info(f"[VIEWS] Account {acc_view['num']} hourly view limit — cooldown 60 min")
+                elif v_res == 'view_daily_limit':
+                    s['views_daily_done'] = True
+                    log.info(f"[VIEWS] Account {acc_view['num']} daily view limit reached!")
+
+            continue
+
+        # Step 3: Neither Likes nor Views available right now
+        all_likes_done = all(s['likes_daily_done'] or s['likes_disabled'] for s in states.values())
+        all_views_done = all(s['views_daily_done'] for s in states.values())
+
+        if all_likes_done and all_views_done:
+            log.info("=" * 50)
+            log.info("[DONE] Sabhi 5 accounts ki Likes & Views daily limit ho gayi!")
+            log.info("[DONE] Session successfully complete!")
+            log.info("=" * 50)
+            break
+
+        # Some accounts are on cooldown. Sleep until earliest wake time.
+        all_cooldowns = [
+            s['like_cooldown_until'] for s in states.values()
+            if s['like_cooldown_until'] and not s['likes_daily_done'] and not s['likes_disabled']
+        ] + [
+            s['view_cooldown_until'] for s in states.values()
+            if s['view_cooldown_until'] and not s['views_daily_done']
+        ]
+
+        if all_cooldowns:
+            wake = min(all_cooldowns)
+            sleep_time = max((wake - datetime.now()).total_seconds(), 30)
+            log.info(f"[WAIT] All accounts on cooldown until {wake.strftime('%H:%M')} — sleeping {int(sleep_time/60)} min...")
+            time.sleep(sleep_time)
+        else:
+            time.sleep(60)
 
 
 if __name__ == "__main__":
