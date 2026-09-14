@@ -21,9 +21,19 @@ KL_VIEWS_URL = f"{KL_BASE}/free_points/youtube-views"
 KL_LIKES_URL = f"{KL_BASE}/free_points/youtube-likes"
 KL_FREE_POINTS = f"{KL_BASE}/free_points"
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "kingdomlikes.log")
+
 def log(msg):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    formatted = f"[{ts}] {msg}"
+    print(formatted, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted + "\n")
+    except Exception:
+        pass
 
 def get_balance(page):
     try:

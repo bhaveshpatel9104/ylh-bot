@@ -80,3 +80,11 @@ jobs:
           KL_COOKIES: ${{ secrets.KL_COOKIES }}
           GOOGLE_COOKIES: ${{ secrets.GOOGLE_COOKIES }}
         run: python kingdomlikes_cloud.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingdomlikes-bot-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7
