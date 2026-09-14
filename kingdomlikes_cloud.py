@@ -1,8 +1,8 @@
 """
 KingdomLikes Cloud Bot for GitHub Actions
 =========================================
-Runs headlessly in Ubuntu runner on GitHub Actions.
-Performs continuous YouTube Views farming and priority YouTube Likes checks.
+Runs headlessly in Ubuntu runner on GitHub Actions using injected session cookies.
+No login form, no captcha needed!
 """
 
 import os
@@ -13,8 +13,6 @@ import json
 import datetime
 from playwright.sync_api import sync_playwright
 
-KL_EMAIL = os.environ.get("KL_EMAIL", "patelbhavesh9130@gmail.com")
-KL_PASSWORD = os.environ.get("KL_PASSWORD", "BHAVESH91045678VV")
 KL_COOKIES_RAW = os.environ.get("KL_COOKIES", "")
 GOOGLE_COOKIES_RAW = os.environ.get("GOOGLE_COOKIES", "")
 
@@ -27,20 +25,6 @@ def log(msg):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
-def parse_timer_seconds(time_str):
-    if not time_str:
-        return 60
-    parts = time_str.strip().split(":")
-    if len(parts) == 2:
-        try:
-            return int(parts[0]) * 60 + int(parts[1])
-        except ValueError:
-            return 60
-    try:
-        return int(parts[0])
-    except ValueError:
-        return 60
-
 def get_balance(page):
     try:
         body = page.inner_text("body")
@@ -50,65 +34,6 @@ def get_balance(page):
     except Exception:
         pass
     return None
-
-def login_to_kingdomlikes(page):
-    log("Navigating to KingdomLikes...")
-    page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=35000)
-    time.sleep(2)
-
-    # Check if already logged in via injected cookies
-    bal = get_balance(page)
-    if bal is not None:
-        log(f"Already logged in via session cookies! Balance: {bal} Points")
-        return True
-
-    log(f"Session not active. Navigating to login page...")
-    page.goto("https://kingdomlikes.com/login", wait_until="networkidle", timeout=35000)
-    time.sleep(2)
-
-    log(f"Filling login form for {KL_EMAIL}...")
-    page.fill('input[type="email"], input[name*="email"]', KL_EMAIL)
-    page.fill('input[type="password"]', KL_PASSWORD)
-
-    # Check Remember me
-    rem = page.query_selector('input[type="checkbox"]')
-    if rem and not rem.is_checked():
-        rem.check()
-
-    # Look for reCAPTCHA iframe and click checkbox
-    for frame in page.frames:
-        if "recaptcha" in frame.url or "google.com/recaptcha" in frame.url:
-            try:
-                cb = frame.query_selector(".recaptcha-checkbox-border, #recaptcha-anchor")
-                if cb:
-                    cb.click()
-                    log("Clicked reCAPTCHA checkbox in frame.")
-                    time.sleep(3)
-            except Exception as e:
-                log(f"reCAPTCHA frame interaction note: {e}")
-
-    time.sleep(1)
-    submit_btn = page.query_selector('button[type="submit"], button:has-text("Enter the Kingdom"), button:has-text("Log In")')
-    if submit_btn:
-        submit_btn.click()
-    time.sleep(6)
-
-    # Check if redirected to dashboard or free_points
-    page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=30000)
-    time.sleep(3)
-
-    bal = get_balance(page)
-    if bal is not None:
-        log(f"Successfully logged in! Starting Balance: {bal} Points")
-        return True
-    else:
-        log("Warning: Could not detect TOTAL BALANCE after login. Current URL: " + page.url)
-        # Check body text snippet for debugging
-        body = page.inner_text("body")
-        for l in body.split("\n")[:10]:
-            if l.strip():
-                log("   " + l.strip())
-        return False
 
 def check_and_do_like(page, context):
     try:
@@ -272,7 +197,10 @@ def main():
     log("KINGDOMLIKES CLOUD BOT (GITHUB ACTIONS)")
     log("=" * 60)
 
-    # Session limit: 300 minutes (GitHub Actions allows up to 350)
+    if not KL_COOKIES_RAW:
+        log("ERROR: KL_COOKIES secret not provided. Please sync cookies first.")
+        sys.exit(1)
+
     MAX_SESSION_MINUTES = 300
     session_start = time.time()
 
@@ -293,33 +221,39 @@ def main():
             viewport={"width": 1280, "height": 800}
         )
 
-        # 1. Inject KingdomLikes cookies if provided
-        if KL_COOKIES_RAW:
-            try:
-                kl_cookies = json.loads(KL_COOKIES_RAW)
-                context.add_cookies(kl_cookies)
-                log(f"Injected {len(kl_cookies)} KingdomLikes cookies into browser context.")
-            except Exception as e:
-                log(f"KingdomLikes cookies parse warning: {e}")
+        # 1. Inject KingdomLikes cookies
+        try:
+            kl_cookies = json.loads(KL_COOKIES_RAW)
+            context.add_cookies(kl_cookies)
+            log(f"Injected {len(kl_cookies)} KingdomLikes session cookies.")
+        except Exception as e:
+            log(f"KingdomLikes cookies error: {e}")
+            sys.exit(1)
 
-        # 2. Inject Google cookies if provided
+        # 2. Inject Google cookies
         if GOOGLE_COOKIES_RAW:
             try:
                 g_cookies = json.loads(GOOGLE_COOKIES_RAW)
                 context.add_cookies(g_cookies)
-                log(f"Injected {len(g_cookies)} Google cookies into browser context.")
+                log(f"Injected {len(g_cookies)} Google cookies.")
             except Exception as e:
-                log(f"Google cookies parse warning: {e}")
+                log(f"Google cookies warning: {e}")
 
         page = context.new_page()
 
-        if not login_to_kingdomlikes(page):
-            log("Login failed. Exiting.")
+        log("Navigating to https://kingdomlikes.com/free_points ...")
+        page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=35000)
+        time.sleep(3)
+
+        # Verify active session
+        body = page.inner_text("body")
+        if "login" in page.url.lower() or "Enter the Kingdom" in body:
+            log("ERROR: Session cookie rejected or expired. Please re-run auto_refresh_cookies.py on your PC.")
             browser.close()
             sys.exit(1)
 
         start_bal = get_balance(page) or 0
-        log(f"Session started! Initial Balance: {start_bal} Points\n")
+        log(f"ACTIVE SESSION CONFIRMED! Starting Balance: {start_bal} Points\n")
 
         consecutive_empty = 0
 
@@ -342,7 +276,7 @@ def main():
             else:
                 consecutive_empty += 1
                 wait_sec = min(60, 15 * consecutive_empty)
-                log(f">> Both queues empty/idle. Sleeping {wait_sec}s before next check...")
+                log(f">> Both queues idle. Sleeping {wait_sec}s before next check...")
                 time.sleep(wait_sec)
 
         end_bal = get_balance(page) or 0
