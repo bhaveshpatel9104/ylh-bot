@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright
 
 KL_EMAIL = os.environ.get("KL_EMAIL", "patelbhavesh9130@gmail.com")
 KL_PASSWORD = os.environ.get("KL_PASSWORD", "BHAVESH91045678VV")
+KL_COOKIES_RAW = os.environ.get("KL_COOKIES", "")
 GOOGLE_COOKIES_RAW = os.environ.get("GOOGLE_COOKIES", "")
 
 KL_BASE = "https://kingdomlikes.com"
@@ -51,18 +52,21 @@ def get_balance(page):
     return None
 
 def login_to_kingdomlikes(page):
-    log("Navigating to KingdomLikes login...")
+    log("Navigating to KingdomLikes...")
+    page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=35000)
+    time.sleep(2)
+
+    # Check if already logged in via injected cookies
+    bal = get_balance(page)
+    if bal is not None:
+        log(f"Already logged in via session cookies! Balance: {bal} Points")
+        return True
+
+    log(f"Session not active. Navigating to login page...")
     page.goto("https://kingdomlikes.com/login", wait_until="networkidle", timeout=35000)
     time.sleep(2)
 
-    # Check if already logged in
-    body = page.inner_text("body")
-    if "TOTAL BALANCE" in body:
-        bal = get_balance(page)
-        log(f"Already logged in! Current Balance: {bal} Points")
-        return True
-
-    log(f"Logging in as {KL_EMAIL}...")
+    log(f"Filling login form for {KL_EMAIL}...")
     page.fill('input[type="email"], input[name*="email"]', KL_EMAIL)
     page.fill('input[type="password"]', KL_PASSWORD)
 
@@ -71,13 +75,27 @@ def login_to_kingdomlikes(page):
     if rem and not rem.is_checked():
         rem.check()
 
+    # Look for reCAPTCHA iframe and click checkbox
+    for frame in page.frames:
+        if "recaptcha" in frame.url or "google.com/recaptcha" in frame.url:
+            try:
+                cb = frame.query_selector(".recaptcha-checkbox-border, #recaptcha-anchor")
+                if cb:
+                    cb.click()
+                    log("Clicked reCAPTCHA checkbox in frame.")
+                    time.sleep(3)
+            except Exception as e:
+                log(f"reCAPTCHA frame interaction note: {e}")
+
     time.sleep(1)
-    page.click('button[type="submit"]')
+    submit_btn = page.query_selector('button[type="submit"], button:has-text("Enter the Kingdom"), button:has-text("Log In")')
+    if submit_btn:
+        submit_btn.click()
     time.sleep(6)
 
     # Check if redirected to dashboard or free_points
     page.goto(KL_FREE_POINTS, wait_until="networkidle", timeout=30000)
-    time.sleep(2)
+    time.sleep(3)
 
     bal = get_balance(page)
     if bal is not None:
@@ -85,6 +103,11 @@ def login_to_kingdomlikes(page):
         return True
     else:
         log("Warning: Could not detect TOTAL BALANCE after login. Current URL: " + page.url)
+        # Check body text snippet for debugging
+        body = page.inner_text("body")
+        for l in body.split("\n")[:10]:
+            if l.strip():
+                log("   " + l.strip())
         return False
 
 def check_and_do_like(page, context):
@@ -270,7 +293,16 @@ def main():
             viewport={"width": 1280, "height": 800}
         )
 
-        # Inject Google cookies if available (helps with YouTube liking in popup)
+        # 1. Inject KingdomLikes cookies if provided
+        if KL_COOKIES_RAW:
+            try:
+                kl_cookies = json.loads(KL_COOKIES_RAW)
+                context.add_cookies(kl_cookies)
+                log(f"Injected {len(kl_cookies)} KingdomLikes cookies into browser context.")
+            except Exception as e:
+                log(f"KingdomLikes cookies parse warning: {e}")
+
+        # 2. Inject Google cookies if provided
         if GOOGLE_COOKIES_RAW:
             try:
                 g_cookies = json.loads(GOOGLE_COOKIES_RAW)

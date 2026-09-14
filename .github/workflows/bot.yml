@@ -79,5 +79,6 @@ jobs:
           DISPLAY: ":99"
           KL_EMAIL: ${{ secrets.KL_EMAIL || 'patelbhavesh9130@gmail.com' }}
           KL_PASSWORD: ${{ secrets.KL_PASSWORD || 'BHAVESH91045678VV' }}
+          KL_COOKIES: ${{ secrets.KL_COOKIES }}
           GOOGLE_COOKIES: ${{ secrets.GOOGLE_COOKIES }}
         run: python kingdomlikes_cloud.py
