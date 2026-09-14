@@ -95,11 +95,15 @@ def check_and_do_like(page, context):
 
     body = page.inner_text("body")
     if "All caught up" in body or "No sites left" in body:
+        log(">> Likes Queue: All caught up / No sites left.")
         page.remove_listener("response", on_response)
         return False
 
     btn_el = page.query_selector('button:has-text("Like & Earn")')
     if not btn_el:
+        # Log first 300 chars of body to diagnose what's on the page
+        preview = " | ".join(l.strip() for l in body.split("\n") if l.strip())[:300]
+        log(f">> No 'Like & Earn' button found. Page preview: {preview}")
         page.remove_listener("response", on_response)
         return False
 
