@@ -66,6 +66,23 @@ def get_balance(page):
         pass
     return None
 
+def check_queues_available(page):
+    """Fast check via API whether any YouTube like or view task is available, without reloading the page."""
+    try:
+        return page.evaluate("""
+            async () => {
+                try {
+                    const l = await (await fetch('/api/v1/earn/sites/next?type_id=7&order=0')).json();
+                    const v = await (await fetch('/api/v1/earn/sites/next?type_id=6&order=0')).json();
+                    return { hasLikes: Boolean(l && l.data), hasViews: Boolean(v && v.data) };
+                } catch(e) {
+                    return { hasLikes: true, hasViews: true };
+                }
+            }
+        """)
+    except Exception:
+        return {"hasLikes": True, "hasViews": True}
+
 def dismiss_modals_if_any(page):
     """Dismisses any EarnAlertModal that might pop up (e.g. 'Don't close so fast!' or 'Interaction not detected')."""
     try:
@@ -482,8 +499,13 @@ def main():
             # 3. Both queues empty
             consecutive_empty += 1
             wait_sec = min(90, 30 * consecutive_empty)
-            log(f">> Both queues idle (no YouTube tasks available). Sleeping {wait_sec}s before next check...")
+            log(f">> Both queues idle (0 YouTube tasks available on site). Sleeping {wait_sec}s before next check...")
             time.sleep(wait_sec)
+
+            # Fast lightweight API check: if still empty, stay on current page without heavy navigations
+            q_status = check_queues_available(page)
+            if not q_status.get("hasLikes") and not q_status.get("hasViews"):
+                continue
 
         # Before finishing, wait for any remaining verifying slots
         wait_for_verifying_slots(page, max_wait_sec=30)
