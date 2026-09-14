@@ -35,12 +35,29 @@ def log(msg):
     except Exception:
         pass
 
+def is_logged_in(page):
+    try:
+        url = (page.url or "").lower()
+        if "login" in url or "signin" in url:
+            return False
+        body = page.inner_text("body")
+        if "Enter the Kingdom" in body or "Access the Kingdom" in body:
+            return False
+        if "LOG IN" in body and "SIGN UP" in body and "TOTAL BALANCE" not in body:
+            return False
+        return True
+    except Exception:
+        return False
+
 def get_balance(page):
     try:
         body = page.inner_text("body")
-        m = re.search(r'(\d+)\s*\n\s*TOTAL BALANCE', body)
+        m = re.search(r'(\d+)\s*\n\s*TOTAL BALANCE', body, re.IGNORECASE)
         if m:
             return int(m.group(1))
+        m2 = re.search(r'TOTAL BALANCE\s*\n\s*(\d+)', body, re.IGNORECASE)
+        if m2:
+            return int(m2.group(1))
     except Exception:
         pass
     return None
@@ -51,6 +68,10 @@ def check_and_do_like(page, context):
         time.sleep(2)
     except Exception as e:
         log(f"Likes page load notice: {e}")
+        return False
+
+    if not is_logged_in(page):
+        log(">> Notice: Likes page not logged in (Session expired or logged in from another browser).")
         return False
 
     body = page.inner_text("body")
@@ -124,6 +145,10 @@ def do_one_view(page, context):
         time.sleep(2)
     except Exception as e:
         log(f"Views page load notice: {e}")
+        return False
+
+    if not is_logged_in(page):
+        log(">> Notice: Views page not logged in (Session expired or logged in from another browser).")
         return False
 
     body = page.inner_text("body")
@@ -300,6 +325,15 @@ def main():
         consecutive_empty = 0
 
         while (time.time() - session_start) < (MAX_SESSION_MINUTES * 60):
+            # Check session status
+            if not is_logged_in(page):
+                log("=" * 60)
+                log(">> [SESSION TERMINATED] KingdomLikes session was closed.")
+                log(">> Cause: Account logged in from another browser / device (Single-session limit).")
+                log(">> Note: Keep KingdomLikes closed on your PC browser so cloud bot can farm 24/7.")
+                log("=" * 60)
+                break
+
             # 1. Check Likes first
             has_like = check_and_do_like(page, context)
             if has_like:
