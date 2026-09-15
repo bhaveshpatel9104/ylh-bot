@@ -132,6 +132,12 @@ def check_and_do_like(page, context):
         log(">> Notice: Likes page not logged in (Session expired or logged in from another browser).")
         return False
 
+    # Wait up to 5 seconds for Vue 3 card to finish loading
+    try:
+        page.wait_for_selector('button:has-text("Like & Earn"), :has-text("All caught up"), :has-text("No sites left")', timeout=5000)
+    except Exception:
+        pass
+
     body = page.inner_text("body")
     if "All caught up" in body or "No sites left" in body:
         log(">> Likes Queue: All caught up / No sites left.")
@@ -147,8 +153,7 @@ def check_and_do_like(page, context):
             time.sleep(3)
             return True
 
-        preview = " | ".join(l.strip() for l in body.split("\n") if l.strip())[:250]
-        log(f">> No 'Like & Earn' button found. Page state: {preview}")
+        log(">> Likes Queue: All caught up / No sites left.")
         return False
 
     log(">> Active Like task found! Opening video popup...")
@@ -473,6 +478,18 @@ def main():
                 log("=" * 60)
                 break
 
+            # If previous cycle found both queues empty, do a fast lightweight API check first
+            if consecutive_empty > 0:
+                q_status = check_queues_available(page)
+                if not q_status.get("hasLikes") and not q_status.get("hasViews"):
+                    consecutive_empty += 1
+                    wait_sec = min(90, 30 * consecutive_empty)
+                    log(f">> Both queues still idle (0 YouTube tasks available on site). Sleeping {wait_sec}s...")
+                    time.sleep(wait_sec)
+                    continue
+                else:
+                    consecutive_empty = 0
+
             # 1. Farm Likes first (while on likes page)
             has_like = check_and_do_like(page, context)
             if has_like:
@@ -501,11 +518,6 @@ def main():
             wait_sec = min(90, 30 * consecutive_empty)
             log(f">> Both queues idle (0 YouTube tasks available on site). Sleeping {wait_sec}s before next check...")
             time.sleep(wait_sec)
-
-            # Fast lightweight API check: if still empty, stay on current page without heavy navigations
-            q_status = check_queues_available(page)
-            if not q_status.get("hasLikes") and not q_status.get("hasViews"):
-                continue
 
         # Before finishing, wait for any remaining verifying slots
         wait_for_verifying_slots(page, max_wait_sec=30)
